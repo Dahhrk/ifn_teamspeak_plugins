@@ -7,6 +7,8 @@ TeamSpeak 3 client plugins for IceFuse tasks. Windows (win32/win64), C++ against
 | Plugin | What it does |
 |---|---|
 | `group-finder` | Lists server groups under Plugins > IFN Group Finder. Pick one and it prints that group's members in the server chat tab - online members as clickable PM links, offline members in plain text. |
+| `staff-tools` | Right-click a client: pull to your channel, send to Jail, grant/revoke talk power, poke presets, kicks, 1h/24h bans. The jail channel is found by name, so it works on any server with a matching channel. |
+| `staff-board` | Prints an online-staff board to the server tab, grouped by rank tier (Executive, Leadership, Moderation, TeamSpeak, Game Master, Mentors, Recruitment, Forums), with clickable PM links. |
 
 ## Build
 
@@ -32,6 +34,7 @@ The build, staging, and `.ts3_plugin` packaging are derived from the registry en
 ```text
 CMakeLists.txt            root build, SDK pin, plugin registry
 cmake/Ts3Plugin.cmake     ts3_plugin() helper: shared lib + .ts3_plugin packaging
+common/ts3plugin.hpp      shared export boilerplate, menu alloc, client/channel helpers
 build.ps1                 one-shot configure/build/package for both arches
 plugins/<name>/           one folder per plugin: CMakeLists.txt, package.ini, src/
 dist/                     packaged .ts3_plugin output (gitignored)
