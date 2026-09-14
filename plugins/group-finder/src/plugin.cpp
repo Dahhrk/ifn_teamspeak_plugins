@@ -1,30 +1,9 @@
-#ifdef _WIN32
-#define PLUGINS_EXPORTDLL __declspec(dllexport)
-#else
-#define PLUGINS_EXPORTDLL __attribute__((visibility("default")))
-#endif
-
 #include <algorithm>
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
 #include <map>
-#include <string>
 #include <vector>
 
-#include "plugin_definitions.h"
-#include "teamspeak/public_definitions.h"
-#include "teamspeak/public_errors.h"
-#include "ts3_functions.h"
+#include "ts3plugin.hpp"
 
-static struct TS3Functions ts3Functions;
-static char* pluginID = NULL;
-
-#define PLUGIN_NAME "IFN Group Finder"
-#define PLUGIN_VERSION "1.0"
-#define PLUGIN_AUTHOR "Dahhrk"
-#define PLUGIN_DESCRIPTION "Find users by server group and print clickable PM links."
-#define PLUGIN_API_VERSION 23
 #define RETURN_CODE "gf"
 #define MENU_ID_REFRESH 0
 #define MENU_ID_GROUP_BASE 1
@@ -49,12 +28,8 @@ struct Pending {
 static std::map<uint64, std::vector<Group>> g_groups;
 static std::map<uint64, Pending> g_pending;
 
-static std::string sanitize(const char* s) {
-    std::string out = s ? s : "";
-    std::replace(out.begin(), out.end(), '[', '(');
-    std::replace(out.begin(), out.end(), ']', ')');
-    return out;
-}
+TS3_PLUGIN_IDENTITY("IFN Group Finder", "1.0", "Dahhrk",
+                    "Find users by server group and print clickable PM links.", 23)
 
 static void requestGroupList(uint64 schid) {
     g_groups.erase(schid);
@@ -68,27 +43,18 @@ static void flushPending(uint64 schid) {
     g_pending.erase(pit);
 
     std::map<std::string, anyID> onlineByUid;
-    anyID* ids = NULL;
-    if (ts3Functions.getClientList(schid, &ids) == ERROR_ok && ids) {
-        for (size_t i = 0; ids[i] != 0; ++i) {
-            char* uid = NULL;
-            if (ts3Functions.getClientVariableAsString(schid, ids[i], CLIENT_UNIQUE_IDENTIFIER, &uid) == ERROR_ok && uid) {
-                onlineByUid[uid] = ids[i];
-                ts3Functions.freeMemory(uid);
-            }
-        }
-        ts3Functions.freeMemory(ids);
-    }
+    for (anyID clid : ts3ClientList(schid))
+        onlineByUid[ts3ClientString(schid, clid, CLIENT_UNIQUE_IDENTIFIER)] = clid;
 
     size_t online = 0;
     for (const auto& m : p.members)
         if (onlineByUid.count(m.uid)) ++online;
 
-    std::string out = "[b]" + sanitize(p.groupName.c_str()) + "[/b] - " +
+    std::string out = "[b]" + ts3Sanitize(p.groupName.c_str()) + "[/b] - " +
                       std::to_string(p.members.size()) + " members, " +
                       std::to_string(online) + " online\n";
     for (const auto& m : p.members) {
-        std::string name = sanitize(m.name.c_str());
+        std::string name = ts3Sanitize(m.name.c_str());
         auto it = onlineByUid.find(m.uid);
         if (it != onlineByUid.end()) {
             out += "[url=client://" + std::to_string(it->second) + "/" + m.uid + "~" + name + "]" + name + "[/url]\n";
@@ -101,29 +67,6 @@ static void flushPending(uint64 schid) {
 
 extern "C" {
 
-PLUGINS_EXPORTDLL const char* ts3plugin_name() { return PLUGIN_NAME; }
-PLUGINS_EXPORTDLL const char* ts3plugin_version() { return PLUGIN_VERSION; }
-PLUGINS_EXPORTDLL int ts3plugin_apiVersion() { return PLUGIN_API_VERSION; }
-PLUGINS_EXPORTDLL const char* ts3plugin_author() { return PLUGIN_AUTHOR; }
-PLUGINS_EXPORTDLL const char* ts3plugin_description() { return PLUGIN_DESCRIPTION; }
-PLUGINS_EXPORTDLL void ts3plugin_setFunctionPointers(const struct TS3Functions funcs) { ts3Functions = funcs; }
-PLUGINS_EXPORTDLL int ts3plugin_init() { return 0; }
-
-PLUGINS_EXPORTDLL void ts3plugin_shutdown() {
-    if (pluginID) {
-        free(pluginID);
-        pluginID = NULL;
-    }
-}
-
-PLUGINS_EXPORTDLL void ts3plugin_registerPluginID(const char* id) {
-    const size_t len = strlen(id) + 1;
-    pluginID = (char*)malloc(len);
-    memcpy(pluginID, id, len);
-}
-
-PLUGINS_EXPORTDLL void ts3plugin_freeMemory(void* data) { free(data); }
-
 PLUGINS_EXPORTDLL void ts3plugin_initMenus(struct PluginMenuItem*** menuItems, char** menuIcon) {
     uint64 schid = ts3Functions.getCurrentServerConnectionHandlerID();
     auto git = g_groups.find(schid);
@@ -131,24 +74,12 @@ PLUGINS_EXPORTDLL void ts3plugin_initMenus(struct PluginMenuItem*** menuItems, c
 
     const size_t itemCount = groupCount + 1;
     *menuItems = (struct PluginMenuItem**)malloc((itemCount + 1) * sizeof(struct PluginMenuItem*));
-
-    struct PluginMenuItem* refresh = (struct PluginMenuItem*)malloc(sizeof(struct PluginMenuItem));
-    refresh->type = PLUGIN_MENU_TYPE_GLOBAL;
-    refresh->id = MENU_ID_REFRESH;
-    strncpy(refresh->text, "Refresh group list", PLUGIN_MENU_BUFSZ - 1);
-    refresh->text[PLUGIN_MENU_BUFSZ - 1] = '\0';
-    refresh->icon[0] = '\0';
-    (*menuItems)[0] = refresh;
+    (*menuItems)[0] = ts3MakeMenuItem(PLUGIN_MENU_TYPE_GLOBAL, MENU_ID_REFRESH, "Refresh group list");
 
     if (git != g_groups.end()) {
         for (size_t i = 0; i < groupCount; ++i) {
-            struct PluginMenuItem* item = (struct PluginMenuItem*)malloc(sizeof(struct PluginMenuItem));
-            item->type = PLUGIN_MENU_TYPE_GLOBAL;
-            item->id = MENU_ID_GROUP_BASE + (int)i;
-            strncpy(item->text, git->second[i].name.c_str(), PLUGIN_MENU_BUFSZ - 1);
-            item->text[PLUGIN_MENU_BUFSZ - 1] = '\0';
-            item->icon[0] = '\0';
-            (*menuItems)[i + 1] = item;
+            (*menuItems)[i + 1] = ts3MakeMenuItem(PLUGIN_MENU_TYPE_GLOBAL,
+                MENU_ID_GROUP_BASE + (int)i, git->second[i].name.c_str());
         }
     }
     (*menuItems)[itemCount] = NULL;

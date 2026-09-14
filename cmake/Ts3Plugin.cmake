@@ -3,6 +3,7 @@ function(ts3_plugin NAME)
 
     add_library(${NAME} SHARED ${ARG_SOURCES})
     target_link_libraries(${NAME} PRIVATE ts3sdk)
+    target_include_directories(${NAME} PRIVATE ${CMAKE_SOURCE_DIR}/common)
     set_target_properties(${NAME} PROPERTIES PREFIX "")
 
     if(CMAKE_SIZEOF_VOID_P EQUAL 8)
