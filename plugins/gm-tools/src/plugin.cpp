@@ -1,5 +1,7 @@
 #include <algorithm>
+#include <chrono>
 #include <map>
+#include <set>
 #include <vector>
 
 #include "ts3plugin.hpp"
@@ -11,6 +13,7 @@
 #define MENU_ID_POKE_MEETING 3
 #define MENU_ID_TALK_GRANT 4
 #define MENU_ID_TALK_REVOKE 5
+#define MENU_ID_RADAR 6
 #define MENU_ID_PULL_BASE 100
 
 struct Group {
@@ -19,9 +22,13 @@ struct Group {
 };
 
 static std::map<uint64, std::vector<Group>> g_groups;
+static std::map<uint64, std::set<uint64>> g_gmSgids;
+static std::map<uint64, std::map<std::string, std::string>> g_gmOnline;
+static std::map<uint64, bool> g_radarOn;
+static std::map<uint64, std::chrono::steady_clock::time_point> g_radarQuiet;
 
-TS3_PLUGIN_IDENTITY("IFN GM Tools", "1.0", "Dahhrk",
-                    "Event tools: pull groups to your channel, channel pokes, channel-wide talk power.", 23)
+TS3_PLUGIN_IDENTITY("IFN GM Tools", "1.1", "Dahhrk",
+                    "Event tools: pull groups, channel pokes, channel-wide talk power, GM attendance radar.", 23)
 TS3_PLUGIN_LIFECYCLE_DEFAULT
 
 static std::vector<anyID> channelClients(uint64 schid, uint64 cid) {
@@ -111,6 +118,7 @@ PLUGINS_EXPORTDLL void ts3plugin_initMenus(struct PluginMenuItem*** menuItems, c
         {MENU_ID_POKE_MEETING, "Poke my channel: meeting in 5 min"},
         {MENU_ID_TALK_GRANT, "Grant talk power to my channel"},
         {MENU_ID_TALK_REVOKE, "Revoke talk power from my channel"},
+        {MENU_ID_RADAR, "Toggle GM radar"},
         {MENU_ID_REFRESH, "Refresh group list"},
     };
     const size_t fixedCount = sizeof(fixed) / sizeof(fixed[0]);
@@ -149,8 +157,16 @@ PLUGINS_EXPORTDLL void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuTy
         case MENU_ID_TALK_REVOKE:
             setChannelTalker(schid, 0);
             return;
+        case MENU_ID_RADAR: {
+            bool on = !g_radarOn[schid];
+            g_radarOn[schid] = on;
+            std::string msg = std::string("GM Tools: GM radar ") + (on ? "on" : "off");
+            ts3Functions.printMessage(schid, msg.c_str(), PLUGIN_MESSAGE_TARGET_SERVER);
+            return;
+        }
         case MENU_ID_REFRESH:
             g_groups.erase(schid);
+            g_gmSgids.erase(schid);
             ts3Functions.requestServerGroupList(schid, "");
             return;
     }
@@ -165,14 +181,62 @@ PLUGINS_EXPORTDLL void ts3plugin_onConnectStatusChangeEvent(uint64 schid, int ne
     if (newStatus == STATUS_CONNECTION_ESTABLISHED) {
         ts3Functions.requestChannelSubscribeAll(schid, "");
         ts3Functions.requestServerGroupList(schid, "");
+        g_radarOn[schid] = true;
+        g_radarQuiet[schid] = std::chrono::steady_clock::now() + std::chrono::seconds(15);
     } else if (newStatus == STATUS_DISCONNECTED) {
         g_groups.erase(schid);
+        g_gmSgids.erase(schid);
+        g_gmOnline.erase(schid);
+        g_radarOn.erase(schid);
+        g_radarQuiet.erase(schid);
+    }
+}
+
+static bool isGm(uint64 schid, anyID clid) {
+    auto sit = g_gmSgids.find(schid);
+    if (sit == g_gmSgids.end()) return false;
+    std::string csv = ts3ClientString(schid, clid, CLIENT_SERVERGROUPS);
+    size_t pos = 0;
+    while (pos <= csv.size()) {
+        size_t comma = csv.find(',', pos);
+        std::string tok = csv.substr(pos, comma == std::string::npos ? comma : comma - pos);
+        if (!tok.empty() && sit->second.count((uint64)strtoull(tok.c_str(), NULL, 10))) return true;
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+    }
+    return false;
+}
+
+PLUGINS_EXPORTDLL void ts3plugin_onClientMoveEvent(uint64 schid, anyID clientID, uint64 oldChannelID, uint64 newChannelID, int visibility, const char* moveMessage) {
+    auto rit = g_radarOn.find(schid);
+    if (rit == g_radarOn.end() || !rit->second) return;
+    if (clientID == ts3SelfClientID(schid)) return;
+
+    if (visibility == ENTER_VISIBILITY) {
+        if (!isGm(schid, clientID)) return;
+        std::string uid = ts3ClientString(schid, clientID, CLIENT_UNIQUE_IDENTIFIER);
+        std::string name = ts3ClientString(schid, clientID, CLIENT_NICKNAME);
+        if (g_gmOnline[schid].count(uid)) return;
+        g_gmOnline[schid][uid] = name;
+        auto qit = g_radarQuiet.find(schid);
+        if (qit != g_radarQuiet.end() && std::chrono::steady_clock::now() < qit->second) return;
+        std::string msg = "GM radar: " + ts3Sanitize(name.c_str()) + " connected";
+        ts3Functions.printMessage(schid, msg.c_str(), PLUGIN_MESSAGE_TARGET_SERVER);
+    } else if (visibility == LEAVE_VISIBILITY) {
+        std::string uid = ts3ClientString(schid, clientID, CLIENT_UNIQUE_IDENTIFIER);
+        auto it = g_gmOnline[schid].find(uid);
+        if (it == g_gmOnline[schid].end()) return;
+        std::string msg = "GM radar: " + ts3Sanitize(it->second.c_str()) + " disconnected";
+        g_gmOnline[schid].erase(it);
+        ts3Functions.printMessage(schid, msg.c_str(), PLUGIN_MESSAGE_TARGET_SERVER);
     }
 }
 
 PLUGINS_EXPORTDLL void ts3plugin_onServerGroupListEvent(uint64 schid, uint64 serverGroupID, const char* name, int type, int iconID, int saveDB) {
     if (type != 1) return;
     g_groups[schid].push_back({serverGroupID, name ? name : ""});
+    if (name && strncmp(name, "Game Master", 11) == 0)
+        g_gmSgids[schid].insert(serverGroupID);
 }
 
 PLUGINS_EXPORTDLL void ts3plugin_onServerGroupListFinishedEvent(uint64 schid) {
