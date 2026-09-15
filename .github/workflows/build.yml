@@ -1,0 +1,46 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure x64
+        run: cmake -S . -B build/x64 -A x64
+
+      - name: Build x64
+        run: cmake --build build/x64 --config Release --target package
+
+      - name: Configure Win32
+        run: cmake -S . -B build/win32 -A Win32
+
+      - name: Build Win32
+        run: cmake --build build/win32 --config Release --target package
+
+      - name: Verify packages
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $packages = Get-ChildItem dist/*.ts3_plugin
+          if ($packages.Count -eq 0) { Write-Error "no packages produced"; exit 1 }
+          foreach ($pkg in $packages) {
+            $name = $pkg.BaseName
+            $zip = [IO.Compression.ZipFile]::OpenRead($pkg.FullName)
+            $entries = $zip.Entries | ForEach-Object { $_.FullName }
+            $zip.Dispose()
+            foreach ($need in "package.ini", "plugins/${name}_win32.dll", "plugins/${name}_win64.dll") {
+              if ($entries -notcontains $need) { Write-Error "$name missing $need"; exit 1 }
+            }
+            Write-Host "$name ok"
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ts3-plugins
+          path: dist/*.ts3_plugin
