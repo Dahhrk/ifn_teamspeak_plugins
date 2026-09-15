@@ -9,7 +9,7 @@ TeamSpeak 3 client plugins for IceFuse tasks. Windows (win32/win64), C++ against
 | `group-finder` | Lists server groups under Plugins > IFN Group Finder. Pick one and it prints that group's members in the server chat tab - online members as clickable PM links, offline members in plain text. |
 | `staff-tools` | Right-click a client: pull to your channel, send to Jail (indefinite or 5/15/30/60 min), timed Mute 10/30 min (Muted group), channel mute 10 min (Channel Muted group, restores prior channel group), grant/revoke talk power, poke presets, kicks, 1h/24h bans. Timed actions auto-release - jail returns the client to their original channel and removes Sticky; mutes remove the group (works offline via database ID). A global "Jail/mute board" menu item lists active actions and time remaining. All channels and groups are resolved by name. |
 | `staff-board` | Prints an online-staff board to the server tab, grouped by rank tier (Executive, Leadership, Moderation, TeamSpeak, Game Master, Mentors, Recruitment, Forums), with clickable PM links. |
-| `gm-tools` | Event running: pull every online member of a group into your channel, poke everyone in your channel, grant/revoke talk power for the whole channel, server-wide event announcement, GM attendance radar (prints when Game Master group members connect/disconnect; toggleable). |
+| `gm-tools` | Event running: pull every online member of a group into your channel, poke everyone in your channel, grant/revoke talk power for the whole channel, server-wide event announcement, GM attendance radar (prints when Game Master group members connect/disconnect) and event-channel watch (prints when someone joins a channel matching the `WATCH_NEEDLES` list - "event" by default). Both toggleable. |
 
 ## Build
 
