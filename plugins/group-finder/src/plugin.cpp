@@ -30,6 +30,7 @@ static std::map<uint64, Pending> g_pending;
 
 TS3_PLUGIN_IDENTITY("IFN Group Finder", "1.0", "Dahhrk",
                     "Find users by server group and print clickable PM links.", 23)
+TS3_PLUGIN_LIFECYCLE_DEFAULT
 
 static void requestGroupList(uint64 schid) {
     g_groups.erase(schid);
