@@ -32,13 +32,6 @@ static char* g_pluginID = NULL;
     PLUGINS_EXPORTDLL void ts3plugin_setFunctionPointers(const struct TS3Functions funcs) {    \
         ts3Functions = funcs;                                                                  \
     }                                                                                          \
-    PLUGINS_EXPORTDLL int ts3plugin_init() { return 0; }                                       \
-    PLUGINS_EXPORTDLL void ts3plugin_shutdown() {                                              \
-        if (g_pluginID) {                                                                      \
-            free(g_pluginID);                                                                  \
-            g_pluginID = NULL;                                                                 \
-        }                                                                                      \
-    }                                                                                          \
     PLUGINS_EXPORTDLL void ts3plugin_registerPluginID(const char* id) {                        \
         const size_t len = strlen(id) + 1;                                                     \
         g_pluginID = (char*)malloc(len);                                                       \
@@ -46,6 +39,19 @@ static char* g_pluginID = NULL;
     }                                                                                          \
     PLUGINS_EXPORTDLL void ts3plugin_freeMemory(void* data) { free(data); }                    \
     }
+
+#define TS3_PLUGIN_LIFECYCLE_DEFAULT                                                           \
+    extern "C" {                                                                               \
+    PLUGINS_EXPORTDLL int ts3plugin_init() { return 0; }                                       \
+    PLUGINS_EXPORTDLL void ts3plugin_shutdown() { ts3FreePluginID(); }                         \
+    }
+
+static void ts3FreePluginID() {
+    if (g_pluginID) {
+        free(g_pluginID);
+        g_pluginID = NULL;
+    }
+}
 
 static struct PluginMenuItem* ts3MakeMenuItem(enum PluginMenuType type, int id, const char* text) {
     struct PluginMenuItem* item = (struct PluginMenuItem*)malloc(sizeof(struct PluginMenuItem));

@@ -1,0 +1,6 @@
+{
+  "plugins": {
+    "pstack": true,
+    "cursor-team-kit": true
+  }
+}

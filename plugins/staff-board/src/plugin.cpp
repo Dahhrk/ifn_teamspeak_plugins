@@ -33,6 +33,7 @@ static std::map<uint64, std::vector<Group>> g_groups;
 
 TS3_PLUGIN_IDENTITY("IFN Staff Board", "1.0", "Dahhrk",
                     "Print online staff grouped by rank tier.", 23)
+TS3_PLUGIN_LIFECYCLE_DEFAULT
 
 static std::vector<uint64> parseGroupIds(const std::string& csv) {
     std::vector<uint64> out;

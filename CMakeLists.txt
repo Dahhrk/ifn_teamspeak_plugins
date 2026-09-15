@@ -20,7 +20,7 @@ target_include_directories(ts3sdk INTERFACE ${ts3sdk_SOURCE_DIR}/include ${ts3sd
 
 include(cmake/Ts3Plugin.cmake)
 
-set(TS3_PLUGINS group-finder staff-tools staff-board)
+set(TS3_PLUGINS group-finder staff-tools staff-board gm-tools sticky-tools)
 foreach(plugin IN LISTS TS3_PLUGINS)
     add_subdirectory(plugins/${plugin})
 endforeach()
