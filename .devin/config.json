@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(**)",
+      "Exec(git)",
+      "Exec(gh)",
+      "Exec(npm)",
+      "Exec(npx)",
+      "Exec(node)"
+    ]
+  }
+}

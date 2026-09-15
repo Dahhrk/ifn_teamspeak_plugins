@@ -1,0 +1,28 @@
+# Devin cloud environment for this product.
+# Git-backed blueprint â€” Devin discovers it at the repo root and builds cloud
+# session environments from it. No secrets belong here; seed apps stay
+# secret-free.
+
+maintenance: |
+  git config user.name "Dark"
+  git config user.email "young1504@outlook.com"
+knowledge:
+  - name: test
+    contents: |
+      Friend verify - run on every unit of work before push:
+        powershell -File build.ps1
+        node scripts/close-loop.mjs doctor
+
+  - name: build
+    contents: |
+      powershell -File build.ps1   # cmake configure + build all plugins
+
+  - name: rules
+    contents: |
+      Draft PRs only â€” the author never merges; a Bugbot or fresh-verifier
+      VERIFIED verdict certifies. Autopilot stays off. One verifiable unit
+      per PR with Done means + Keep.
+      Product proof is the control-<app> CLI once it exists â€” generate it
+      with /pstack:create-verification-skill, maintain with
+      /pstack:maintain-verification-skill. A self-report is not done.
+
