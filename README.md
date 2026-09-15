@@ -7,8 +7,9 @@ TeamSpeak 3 client plugins for IceFuse tasks. Windows (win32/win64), C++ against
 | Plugin | What it does |
 |---|---|
 | `group-finder` | Lists server groups under Plugins > IFN Group Finder. Pick one and it prints that group's members in the server chat tab - online members as clickable PM links, offline members in plain text. |
-| `staff-tools` | Right-click a client: pull to your channel, send to Jail, grant/revoke talk power, poke presets, kicks, 1h/24h bans. The jail channel is found by name, so it works on any server with a matching channel. |
+| `staff-tools` | Right-click a client: pull to your channel, send to Jail (indefinite or 5/15/30/60 min), grant/revoke talk power, poke presets, kicks, 1h/24h bans. Jailing applies the Sticky server group; timed jails auto-release to the original channel and remove Sticky. The jail channel and Sticky group are found by name, so it works on any server with a matching channel. |
 | `staff-board` | Prints an online-staff board to the server tab, grouped by rank tier (Executive, Leadership, Moderation, TeamSpeak, Game Master, Mentors, Recruitment, Forums), with clickable PM links. |
+| `gm-tools` | Event running: pull every online member of a group into your channel, poke everyone in your channel, grant/revoke talk power for the whole channel, server-wide event announcement. |
 
 ## Build
 
