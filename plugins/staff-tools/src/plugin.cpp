@@ -30,10 +30,13 @@ enum MenuId {
     MENU_MUTE_30M,
     MENU_CMUTE_10M,
     MENU_UNMUTE,
+    MENU_STICKY,
+    MENU_STICKY_30M,
+    MENU_UNSTICKY,
     MENU_BOARD,
 };
 
-enum ActionKind { ACT_JAIL, ACT_MUTE, ACT_CMUTE };
+enum ActionKind { ACT_JAIL, ACT_MUTE, ACT_CMUTE, ACT_STICKY };
 
 struct TimedRecord {
     std::string uid;
@@ -56,8 +59,8 @@ static std::mutex g_mutex;
 static std::thread g_worker;
 static std::atomic<bool> g_running{false};
 
-TS3_PLUGIN_IDENTITY("IFN Staff Tools", "1.2", "Dahhrk",
-                    "Right-click actions: pull, timed jail/mute with auto-release, talk power, pokes, kicks, bans.", 23)
+TS3_PLUGIN_IDENTITY("IFN Staff Tools", "1.3", "Dahhrk",
+                    "Right-click actions: pull, timed jail/mute/sticky with auto-release, talk power, pokes, kicks, bans.", 23)
 
 static void printError(uint64 schid, const char* msg) {
     ts3Functions.printMessage(schid, msg, PLUGIN_MESSAGE_TARGET_SERVER);
@@ -75,6 +78,7 @@ static const char* kindName(ActionKind k) {
         case ACT_JAIL: return "jail";
         case ACT_MUTE: return "mute";
         case ACT_CMUTE: return "channel mute";
+        case ACT_STICKY: return "sticky";
     }
     return "action";
 }
@@ -94,6 +98,11 @@ static void releaseRecord(uint64 schid, const TimedRecord& rec) {
             if (rec.sgid && rec.dbid)
                 ts3Functions.requestServerGroupDelClient(schid, rec.sgid, rec.dbid, RETURN_CODE);
             if (!clid) detail = " (was offline - Muted removed)";
+            break;
+        case ACT_STICKY:
+            if (rec.sgid && rec.dbid)
+                ts3Functions.requestServerGroupDelClient(schid, rec.sgid, rec.dbid, RETURN_CODE);
+            if (!clid) detail = " (was offline - Sticky removed)";
             break;
         case ACT_CMUTE:
             if (rec.cid && rec.cgid && rec.dbid) {
@@ -248,7 +257,40 @@ static void muteClient(uint64 schid, anyID target, int minutes, bool channelOnly
     printError(schid, msg.c_str());
 }
 
-static void releaseClient(uint64 schid, anyID target, bool jailOnly) {
+static void stickyClient(uint64 schid, anyID target, int minutes) {
+    auto sit = g_stickySgid.find(schid);
+    if (sit == g_stickySgid.end() || !sit->second) {
+        printError(schid, "Staff Tools: no 'Sticky' server group on this server.");
+        return;
+    }
+
+    TimedRecord rec;
+    rec.uid = ts3ClientString(schid, target, CLIENT_UNIQUE_IDENTIFIER);
+    rec.name = ts3ClientString(schid, target, CLIENT_NICKNAME);
+    rec.kind = ACT_STICKY;
+    uint64 dbid = 0;
+    ts3Functions.getClientVariableAsUInt64(schid, target, CLIENT_DATABASE_ID, &dbid);
+    rec.dbid = dbid;
+    rec.sgid = sit->second;
+    rec.cid = 0;
+    rec.cgid = 0;
+    rec.timed = minutes > 0;
+    if (rec.timed)
+        rec.releaseAt = std::chrono::steady_clock::now() + std::chrono::minutes(minutes);
+
+    if (!addRecord(schid, rec)) {
+        printError(schid, "Staff Tools: target already stickied.");
+        return;
+    }
+    if (rec.dbid)
+        ts3Functions.requestServerGroupAddClient(schid, rec.sgid, rec.dbid, RETURN_CODE);
+
+    std::string msg = "Staff Tools: " + ts3Sanitize(rec.name.c_str()) + " stickied";
+    msg += minutes > 0 ? " for " + std::to_string(minutes) + " min" : " - use Unsticky to remove";
+    printError(schid, msg.c_str());
+}
+
+static void releaseClient(uint64 schid, anyID target, std::vector<ActionKind> kinds, const char* noneMsg) {
     std::string uid = ts3ClientString(schid, target, CLIENT_UNIQUE_IDENTIFIER);
     std::vector<TimedRecord> found;
     {
@@ -257,8 +299,7 @@ static void releaseClient(uint64 schid, anyID target, bool jailOnly) {
         if (it == g_records.end()) return;
         for (size_t i = it->second.size(); i-- > 0;) {
             bool match = it->second[i].uid == uid &&
-                         (jailOnly ? it->second[i].kind == ACT_JAIL
-                                   : it->second[i].kind != ACT_JAIL);
+                         std::find(kinds.begin(), kinds.end(), it->second[i].kind) != kinds.end();
             if (match) {
                 found.push_back(it->second[i]);
                 it->second.erase(it->second.begin() + i);
@@ -266,8 +307,7 @@ static void releaseClient(uint64 schid, anyID target, bool jailOnly) {
         }
     }
     if (found.empty()) {
-        printError(schid, jailOnly ? "Staff Tools: target is not jailed."
-                                   : "Staff Tools: target is not muted.");
+        printError(schid, noneMsg);
         return;
     }
     for (auto& rec : found) releaseRecord(schid, rec);
@@ -333,6 +373,9 @@ PLUGINS_EXPORTDLL void ts3plugin_initMenus(struct PluginMenuItem*** menuItems, c
         {MENU_MUTE_30M, "Mute 30 min", PLUGIN_MENU_TYPE_CLIENT},
         {MENU_CMUTE_10M, "Channel mute 10 min", PLUGIN_MENU_TYPE_CLIENT},
         {MENU_UNMUTE, "Unmute", PLUGIN_MENU_TYPE_CLIENT},
+        {MENU_STICKY, "Sticky", PLUGIN_MENU_TYPE_CLIENT},
+        {MENU_STICKY_30M, "Sticky 30 min", PLUGIN_MENU_TYPE_CLIENT},
+        {MENU_UNSTICKY, "Unsticky", PLUGIN_MENU_TYPE_CLIENT},
         {MENU_TALK_GRANT, "Grant talk power", PLUGIN_MENU_TYPE_CLIENT},
         {MENU_TALK_REVOKE, "Revoke talk power", PLUGIN_MENU_TYPE_CLIENT},
         {MENU_POKE_STAFF, "Poke: join staff channel", PLUGIN_MENU_TYPE_CLIENT},
@@ -385,7 +428,7 @@ PLUGINS_EXPORTDLL void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuTy
             jailClient(schid, target, 60);
             break;
         case MENU_RELEASE:
-            releaseClient(schid, target, true);
+            releaseClient(schid, target, {ACT_JAIL}, "Staff Tools: target is not jailed.");
             break;
         case MENU_MUTE_10M:
             muteClient(schid, target, 10, false);
@@ -397,7 +440,16 @@ PLUGINS_EXPORTDLL void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuTy
             muteClient(schid, target, 10, true);
             break;
         case MENU_UNMUTE:
-            releaseClient(schid, target, false);
+            releaseClient(schid, target, {ACT_MUTE, ACT_CMUTE}, "Staff Tools: target is not muted.");
+            break;
+        case MENU_STICKY:
+            stickyClient(schid, target, 0);
+            break;
+        case MENU_STICKY_30M:
+            stickyClient(schid, target, 30);
+            break;
+        case MENU_UNSTICKY:
+            releaseClient(schid, target, {ACT_STICKY}, "Staff Tools: target is not stickied.");
             break;
         case MENU_TALK_GRANT:
             ts3Functions.requestClientSetIsTalker(schid, target, 1, RETURN_CODE);
