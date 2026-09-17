@@ -21,6 +21,7 @@ struct StickyRecord {
     std::string uid;
     uint64 dbid;
     std::string name;
+    uint64 returnCid;
     bool timed;
     std::chrono::steady_clock::time_point releaseAt;
 };
@@ -31,18 +32,29 @@ static std::mutex g_mutex;
 static std::thread g_worker;
 static std::atomic<bool> g_running{false};
 
-TS3_PLUGIN_IDENTITY("IFN Sticky Tools", "1.0", "Dahhrk",
-                    "Mark users with the Sticky group - indefinite or timed with auto-removal.", 23)
+TS3_PLUGIN_IDENTITY("IFN Sticky Tools", "1.1", "Dahhrk",
+                    "Send users to the jail channel with the Sticky group - indefinite or timed with auto-release.", 23)
 
 static void printError(uint64 schid, const char* msg) {
     ts3Functions.printMessage(schid, msg, PLUGIN_MESSAGE_TARGET_SERVER);
 }
 
+static anyID onlineClidByUid(uint64 schid, const std::string& uid) {
+    for (anyID clid : ts3ClientList(schid))
+        if (ts3ClientString(schid, clid, CLIENT_UNIQUE_IDENTIFIER) == uid)
+            return clid;
+    return 0;
+}
+
 static void releaseSticky(uint64 schid, const StickyRecord& rec) {
+    anyID clid = onlineClidByUid(schid, rec.uid);
+    if (clid && rec.returnCid)
+        ts3Functions.requestClientMove(schid, clid, rec.returnCid, "", RETURN_CODE);
     auto sit = g_stickySgid.find(schid);
     if (sit != g_stickySgid.end() && sit->second && rec.dbid)
         ts3Functions.requestServerGroupDelClient(schid, sit->second, rec.dbid, RETURN_CODE);
-    std::string msg = "Sticky: " + ts3Sanitize(rec.name.c_str()) + " unstickied";
+    std::string msg = "Sticky: " + ts3Sanitize(rec.name.c_str()) + " released";
+    if (!clid) msg += " (was offline - Sticky removed)";
     printError(schid, msg.c_str());
 }
 
@@ -75,12 +87,21 @@ static void stickyClient(uint64 schid, anyID target, int minutes) {
         return;
     }
 
+    uint64 jail = 0;
+    if (!ts3FindChannelByName(schid, "jail", &jail)) {
+        printError(schid, "Sticky: no channel containing 'jail' on this server.");
+        return;
+    }
+
     StickyRecord rec;
     rec.uid = ts3ClientString(schid, target, CLIENT_UNIQUE_IDENTIFIER);
     rec.name = ts3ClientString(schid, target, CLIENT_NICKNAME);
     uint64 dbid = 0;
     ts3Functions.getClientVariableAsUInt64(schid, target, CLIENT_DATABASE_ID, &dbid);
     rec.dbid = dbid;
+    uint64 cid = 0;
+    ts3Functions.getChannelOfClient(schid, target, &cid);
+    rec.returnCid = cid;
     rec.timed = minutes > 0;
     if (rec.timed)
         rec.releaseAt = std::chrono::steady_clock::now() + std::chrono::minutes(minutes);
@@ -89,16 +110,18 @@ static void stickyClient(uint64 schid, anyID target, int minutes) {
         std::lock_guard<std::mutex> lock(g_mutex);
         for (auto& r : g_records[schid])
             if (r.uid == rec.uid) {
-                printError(schid, "Sticky: target already stickied.");
+                printError(schid, "Sticky: target already jailed.");
                 return;
             }
         g_records[schid].push_back(rec);
     }
+
+    ts3Functions.requestClientMove(schid, target, jail, "", RETURN_CODE);
     if (rec.dbid)
         ts3Functions.requestServerGroupAddClient(schid, sit->second, rec.dbid, RETURN_CODE);
 
-    std::string msg = "Sticky: " + ts3Sanitize(rec.name.c_str()) + " marked";
-    msg += minutes > 0 ? " for " + std::to_string(minutes) + " min" : " - use Unsticky to remove";
+    std::string msg = "Sticky: " + ts3Sanitize(rec.name.c_str()) + " sent to jail";
+    msg += minutes > 0 ? " for " + std::to_string(minutes) + " min" : " - use Unsticky to release";
     printError(schid, msg.c_str());
 }
 
@@ -135,11 +158,11 @@ static void printBoard(uint64 schid) {
         if (it != g_records.end()) snapshot = it->second;
     }
     if (snapshot.empty()) {
-        printError(schid, "Sticky: nobody is marked.");
+        printError(schid, "Sticky: nobody is jailed.");
         return;
     }
     auto now = std::chrono::steady_clock::now();
-    std::string out = "[b]Stickied users[/b]\n";
+    std::string out = "[b]Jailed users[/b]\n";
     for (auto& rec : snapshot) {
         out += "- " + ts3Sanitize(rec.name.c_str());
         if (rec.timed) {
@@ -151,7 +174,7 @@ static void printBoard(uint64 schid) {
         }
         out += "\n";
     }
-    out += "Right-click a user and Unsticky to remove early.";
+    out += "Right-click a user and Unsticky to release early.";
     ts3Functions.printMessage(schid, out.c_str(), PLUGIN_MESSAGE_TARGET_SERVER);
 }
 
