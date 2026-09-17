@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <time.h>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -22,6 +23,7 @@ struct StickyRecord {
     uint64 dbid;
     uint64 sgid;
     std::string name;
+    std::string channelName;
     uint64 returnCid;
     uint64 jailCid;
     bool timed;
@@ -30,11 +32,12 @@ struct StickyRecord {
 
 static std::map<uint64, std::vector<StickyRecord>> g_records;
 static std::map<uint64, uint64> g_stickySgid;
+static std::map<uint64, std::string> g_serverUid;
 static std::mutex g_mutex;
 static std::thread g_worker;
 static std::atomic<bool> g_running{false};
 
-TS3_PLUGIN_IDENTITY("IFN Sticky Tools", "1.2", "Dahhrk",
+TS3_PLUGIN_IDENTITY("IFN Sticky Tools", "1.3", "Dahhrk",
                     "Send users to the jail channel with the Sticky group - indefinite or timed with auto-release.", 23)
 
 static void printMsg(uint64 schid, const char* msg) {
@@ -59,6 +62,86 @@ static void releaseSticky(uint64 schid, const StickyRecord& rec) {
     printMsg(schid, msg.c_str());
 }
 
+static std::string storePath() {
+    std::string dir = ts3ConfigDir();
+    if (dir.empty()) return dir;
+    if (dir.back() != '\\' && dir.back() != '/') dir += '/';
+    return dir + "ifn_sticky_records.txt";
+}
+
+static void saveRecords() {
+    std::string path = storePath();
+    if (path.empty()) return;
+    std::string body;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto now = std::chrono::steady_clock::now();
+        for (auto& [schid, records] : g_records) {
+            auto sit = g_serverUid.find(schid);
+            if (sit == g_serverUid.end()) continue;
+            for (auto& r : records) {
+                uint64 exp = 0;
+                if (r.timed)
+                    exp = (uint64)((int64_t)time(NULL) +
+                          std::chrono::duration_cast<std::chrono::seconds>(r.releaseAt - now).count());
+                body += ts3Esc(sit->second) + "|" + ts3Esc(r.uid) + "|" +
+                        std::to_string(r.dbid) + "|" + std::to_string(r.sgid) + "|" +
+                        ts3Esc(r.channelName) + "|" + std::to_string(exp) + "|" +
+                        ts3Esc(r.name) + "\n";
+            }
+        }
+    }
+    ts3WriteFile(path, body);
+}
+
+static void releaseSticky(uint64 schid, const StickyRecord& rec);
+
+static void loadRecords(uint64 schid) {
+    std::string server = ts3ServerUid(schid);
+    if (server.empty()) return;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_serverUid[schid] = server;
+    }
+    std::vector<StickyRecord> live, dead;
+    ts3ReadLines(storePath(), server, [&](const std::vector<std::string>& f) {
+        if (f.size() < 7) return;
+        StickyRecord rec;
+        rec.uid = f[1];
+        rec.dbid = strtoull(f[2].c_str(), NULL, 10);
+        rec.sgid = strtoull(f[3].c_str(), NULL, 10);
+        rec.channelName = f[4];
+        uint64 exp = strtoull(f[5].c_str(), NULL, 10);
+        rec.name = f[6];
+        if (rec.uid.empty()) return;
+        rec.timed = exp != 0;
+        rec.returnCid = 0;
+        rec.jailCid = 0;
+        uint64 cid = 0;
+        if (!rec.channelName.empty() && ts3FindChannelByName(schid, rec.channelName.c_str(), &cid))
+            rec.returnCid = cid;
+        if (ts3FindChannelByName(schid, "jail", &cid)) rec.jailCid = cid;
+        if (rec.timed) {
+            int64_t left = (int64_t)exp - (int64_t)time(NULL);
+            if (left <= 0) {
+                dead.push_back(rec);
+                return;
+            }
+            rec.releaseAt = std::chrono::steady_clock::now() + std::chrono::seconds(left);
+        }
+        live.push_back(rec);
+    });
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        for (auto& r : live) g_records[schid].push_back(r);
+    }
+    for (auto& r : dead) releaseSticky(schid, r);
+    if (!live.empty()) {
+        std::string msg = "Sticky: restored " + std::to_string(live.size()) + " jail record(s) from before disconnect.";
+        printMsg(schid, msg.c_str());
+    }
+}
+
 static void timerWorker() {
     while (g_running.load()) {
         std::this_thread::sleep_for(std::chrono::seconds(5));
@@ -76,6 +159,7 @@ static void timerWorker() {
                 }
             }
         }
+        if (!due.empty()) saveRecords();
         for (auto& [schid, records] : due)
             for (auto& rec : records) releaseSticky(schid, rec);
     }
@@ -108,6 +192,7 @@ static void stickyClient(uint64 schid, anyID target, int minutes) {
     uint64 cid = 0;
     ts3Functions.getChannelOfClient(schid, target, &cid);
     rec.returnCid = cid;
+    rec.channelName = cid ? ts3ChannelName(schid, cid) : "";
     rec.jailCid = jail;
     rec.timed = minutes > 0;
     if (rec.timed)
@@ -122,6 +207,7 @@ static void stickyClient(uint64 schid, anyID target, int minutes) {
             }
         g_records[schid].push_back(rec);
     }
+    saveRecords();
 
     ts3Functions.requestClientMove(schid, target, jail, "", RETURN_CODE);
     if (rec.dbid)
@@ -154,6 +240,7 @@ static void unstickyClient(uint64 schid, anyID target) {
         printMsg(schid, "Sticky: target is not jailed.");
         return;
     }
+    saveRecords();
     releaseSticky(schid, rec);
 }
 
@@ -196,6 +283,7 @@ PLUGINS_EXPORTDLL int ts3plugin_init() {
 PLUGINS_EXPORTDLL void ts3plugin_shutdown() {
     g_running.store(false);
     if (g_worker.joinable()) g_worker.join();
+    saveRecords();
     ts3FreePluginID();
 }
 
@@ -273,10 +361,13 @@ PLUGINS_EXPORTDLL void ts3plugin_onConnectStatusChangeEvent(uint64 schid, int ne
     if (newStatus == STATUS_CONNECTION_ESTABLISHED) {
         ts3Functions.requestChannelSubscribeAll(schid, "");
         ts3Functions.requestServerGroupList(schid, "");
+        loadRecords(schid);
     } else if (newStatus == STATUS_DISCONNECTED) {
+        saveRecords();
         std::lock_guard<std::mutex> lock(g_mutex);
         g_records.erase(schid);
         g_stickySgid.erase(schid);
+        g_serverUid.erase(schid);
     }
 }
 

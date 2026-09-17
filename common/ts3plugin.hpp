@@ -8,8 +8,11 @@
 
 #include <ctype.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fstream>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -118,4 +121,82 @@ static anyID ts3SelfClientID(uint64 schid) {
     anyID id = 0;
     ts3Functions.getClientID(schid, &id);
     return id;
+}
+
+static std::string ts3ConfigDir() {
+    char buf[1024];
+    buf[0] = '\0';
+    ts3Functions.getConfigPath(buf, sizeof(buf));
+    return buf;
+}
+
+static std::string ts3ServerUid(uint64 schid) {
+    char* v = NULL;
+    std::string out;
+    if (ts3Functions.getServerVariableAsString(schid, VIRTUALSERVER_UNIQUE_IDENTIFIER, &v) == ERROR_ok && v) {
+        out = v;
+        ts3Functions.freeMemory(v);
+    }
+    return out;
+}
+
+static std::string ts3ChannelName(uint64 schid, uint64 cid) {
+    char* v = NULL;
+    std::string out;
+    if (ts3Functions.getChannelVariableAsString(schid, cid, CHANNEL_NAME, &v) == ERROR_ok && v) {
+        out = v;
+        ts3Functions.freeMemory(v);
+    }
+    return out;
+}
+
+static std::string ts3Esc(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '\\' || c == '|' || c == '\n') out += '\\';
+        out += c == '\n' ? 'n' : c;
+    }
+    return out;
+}
+
+static std::vector<std::string> ts3Split(const std::string& s) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (c == '\\' && i + 1 < s.size()) {
+            cur += s[++i] == 'n' ? '\n' : s[i];
+        } else if (c == '|') {
+            out.push_back(cur);
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    out.push_back(cur);
+    return out;
+}
+
+static bool ts3WriteFile(const std::string& path, const std::string& body) {
+    std::string tmp = path + ".tmp";
+    {
+        std::ofstream out(tmp.c_str(), std::ios::trunc);
+        if (!out) return false;
+        out << body;
+    }
+    std::remove(path.c_str());
+    return std::rename(tmp.c_str(), path.c_str()) == 0;
+}
+
+static void ts3ReadLines(const std::string& path, const std::string& serverUid,
+                         const std::function<void(const std::vector<std::string>&)>& fn) {
+    std::ifstream in(path.c_str());
+    if (!in) return;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        std::vector<std::string> f = ts3Split(line);
+        if (f.size() >= 2 && f[0] == serverUid) fn(f);
+    }
 }
