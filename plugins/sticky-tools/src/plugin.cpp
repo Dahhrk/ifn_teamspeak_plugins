@@ -20,6 +20,7 @@ enum MenuId {
 struct StickyRecord {
     std::string uid;
     uint64 dbid;
+    uint64 sgid;
     std::string name;
     uint64 returnCid;
     uint64 jailCid;
@@ -36,7 +37,7 @@ static std::atomic<bool> g_running{false};
 TS3_PLUGIN_IDENTITY("IFN Sticky Tools", "1.2", "Dahhrk",
                     "Send users to the jail channel with the Sticky group - indefinite or timed with auto-release.", 23)
 
-static void printError(uint64 schid, const char* msg) {
+static void printMsg(uint64 schid, const char* msg) {
     ts3Functions.printMessage(schid, msg, PLUGIN_MESSAGE_TARGET_SERVER);
 }
 
@@ -51,12 +52,11 @@ static void releaseSticky(uint64 schid, const StickyRecord& rec) {
     anyID clid = onlineClidByUid(schid, rec.uid);
     if (clid && rec.returnCid)
         ts3Functions.requestClientMove(schid, clid, rec.returnCid, "", RETURN_CODE);
-    auto sit = g_stickySgid.find(schid);
-    if (sit != g_stickySgid.end() && sit->second && rec.dbid)
-        ts3Functions.requestServerGroupDelClient(schid, sit->second, rec.dbid, RETURN_CODE);
+    if (rec.sgid && rec.dbid)
+        ts3Functions.requestServerGroupDelClient(schid, rec.sgid, rec.dbid, RETURN_CODE);
     std::string msg = "Sticky: " + ts3Sanitize(rec.name.c_str()) + " released";
     if (!clid) msg += " (was offline - Sticky removed)";
-    printError(schid, msg.c_str());
+    printMsg(schid, msg.c_str());
 }
 
 static void timerWorker() {
@@ -84,22 +84,27 @@ static void timerWorker() {
 static void stickyClient(uint64 schid, anyID target, int minutes) {
     auto sit = g_stickySgid.find(schid);
     if (sit == g_stickySgid.end() || !sit->second) {
-        printError(schid, "Sticky: no 'Sticky' server group on this server.");
+        printMsg(schid, "Sticky: no 'Sticky' server group on this server.");
         return;
     }
 
     uint64 jail = 0;
     if (!ts3FindChannelByName(schid, "jail", &jail)) {
-        printError(schid, "Sticky: no channel containing 'jail' on this server.");
+        printMsg(schid, "Sticky: no channel containing 'jail' on this server.");
         return;
     }
 
     StickyRecord rec;
     rec.uid = ts3ClientString(schid, target, CLIENT_UNIQUE_IDENTIFIER);
+    if (rec.uid.empty()) {
+        printMsg(schid, "Sticky: cannot read target identity.");
+        return;
+    }
     rec.name = ts3ClientString(schid, target, CLIENT_NICKNAME);
     uint64 dbid = 0;
     ts3Functions.getClientVariableAsUInt64(schid, target, CLIENT_DATABASE_ID, &dbid);
     rec.dbid = dbid;
+    rec.sgid = sit->second;
     uint64 cid = 0;
     ts3Functions.getChannelOfClient(schid, target, &cid);
     rec.returnCid = cid;
@@ -112,7 +117,7 @@ static void stickyClient(uint64 schid, anyID target, int minutes) {
         std::lock_guard<std::mutex> lock(g_mutex);
         for (auto& r : g_records[schid])
             if (r.uid == rec.uid) {
-                printError(schid, "Sticky: target already jailed.");
+                printMsg(schid, "Sticky: target already jailed.");
                 return;
             }
         g_records[schid].push_back(rec);
@@ -120,11 +125,11 @@ static void stickyClient(uint64 schid, anyID target, int minutes) {
 
     ts3Functions.requestClientMove(schid, target, jail, "", RETURN_CODE);
     if (rec.dbid)
-        ts3Functions.requestServerGroupAddClient(schid, sit->second, rec.dbid, RETURN_CODE);
+        ts3Functions.requestServerGroupAddClient(schid, rec.sgid, rec.dbid, RETURN_CODE);
 
     std::string msg = "Sticky: " + ts3Sanitize(rec.name.c_str()) + " sent to jail";
     msg += minutes > 0 ? " for " + std::to_string(minutes) + " min" : " - use Unsticky to release";
-    printError(schid, msg.c_str());
+    printMsg(schid, msg.c_str());
 }
 
 static void unstickyClient(uint64 schid, anyID target) {
@@ -146,7 +151,7 @@ static void unstickyClient(uint64 schid, anyID target) {
         }
     }
     if (!found) {
-        printError(schid, "Sticky: target is not stickied.");
+        printMsg(schid, "Sticky: target is not jailed.");
         return;
     }
     releaseSticky(schid, rec);
@@ -160,7 +165,7 @@ static void printBoard(uint64 schid) {
         if (it != g_records.end()) snapshot = it->second;
     }
     if (snapshot.empty()) {
-        printError(schid, "Sticky: nobody is jailed.");
+        printMsg(schid, "Sticky: nobody is jailed.");
         return;
     }
     auto now = std::chrono::steady_clock::now();
@@ -222,7 +227,7 @@ PLUGINS_EXPORTDLL void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuTy
     if (type != PLUGIN_MENU_TYPE_CLIENT) return;
     anyID target = (anyID)selectedItemID;
     if (target == ts3SelfClientID(schid)) {
-        printError(schid, "Sticky: cannot target yourself.");
+        printMsg(schid, "Sticky: cannot target yourself.");
         return;
     }
 
@@ -244,12 +249,12 @@ PLUGINS_EXPORTDLL void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuTy
 
 PLUGINS_EXPORTDLL void ts3plugin_onClientMoveEvent(uint64 schid, anyID clientID, uint64 oldChannelID, uint64 newChannelID, int visibility, const char* moveMessage) {
     if (newChannelID == 0 || clientID == ts3SelfClientID(schid)) return;
-    std::string uid = ts3ClientString(schid, clientID, CLIENT_UNIQUE_IDENTIFIER);
     uint64 jail = 0;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         auto it = g_records.find(schid);
-        if (it == g_records.end()) return;
+        if (it == g_records.end() || it->second.empty()) return;
+        std::string uid = ts3ClientString(schid, clientID, CLIENT_UNIQUE_IDENTIFIER);
         for (auto& r : it->second)
             if (r.uid == uid) {
                 jail = r.jailCid;
@@ -260,7 +265,7 @@ PLUGINS_EXPORTDLL void ts3plugin_onClientMoveEvent(uint64 schid, anyID clientID,
         ts3Functions.requestClientMove(schid, clientID, jail, "", RETURN_CODE);
         std::string name = ts3ClientString(schid, clientID, CLIENT_NICKNAME);
         std::string msg = "Sticky: " + ts3Sanitize(name.c_str()) + " moved back to jail";
-        printError(schid, msg.c_str());
+        printMsg(schid, msg.c_str());
     }
 }
 
@@ -284,7 +289,7 @@ PLUGINS_EXPORTDLL int ts3plugin_onServerErrorEvent(uint64 schid, const char* err
     if (!returnCode || strcmp(returnCode, RETURN_CODE) != 0) return 0;
     if (error != ERROR_ok) {
         std::string msg = std::string("Sticky: ") + (errorMessage ? errorMessage : "request failed");
-        printError(schid, msg.c_str());
+        printMsg(schid, msg.c_str());
         return 1;
     }
     return 1;
