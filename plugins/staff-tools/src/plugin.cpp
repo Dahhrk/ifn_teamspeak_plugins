@@ -46,6 +46,7 @@ struct TimedRecord {
     uint64 sgid;
     uint64 cid;
     uint64 cgid;
+    uint64 jailCid;
     bool timed;
     std::chrono::steady_clock::time_point releaseAt;
 };
@@ -59,7 +60,7 @@ static std::mutex g_mutex;
 static std::thread g_worker;
 static std::atomic<bool> g_running{false};
 
-TS3_PLUGIN_IDENTITY("IFN Staff Tools", "1.3", "Dahhrk",
+TS3_PLUGIN_IDENTITY("IFN Staff Tools", "1.4", "Dahhrk",
                     "Right-click actions: pull, timed jail/mute/sticky with auto-release, talk power, pokes, kicks, bans.", 23)
 
 static void printError(uint64 schid, const char* msg) {
@@ -170,6 +171,7 @@ static void jailClient(uint64 schid, anyID target, int minutes) {
     ts3Functions.getChannelOfClient(schid, target, &cid);
     rec.cid = cid;
     rec.cgid = 0;
+    rec.jailCid = jail;
     rec.timed = minutes > 0;
     if (rec.timed)
         rec.releaseAt = std::chrono::steady_clock::now() + std::chrono::minutes(minutes);
@@ -198,6 +200,7 @@ static void muteClient(uint64 schid, anyID target, int minutes, bool channelOnly
     rec.dbid = dbid;
     rec.cid = 0;
     rec.cgid = 0;
+    rec.jailCid = 0;
     rec.timed = minutes > 0;
     if (rec.timed)
         rec.releaseAt = std::chrono::steady_clock::now() + std::chrono::minutes(minutes);
@@ -274,6 +277,7 @@ static void stickyClient(uint64 schid, anyID target, int minutes) {
     rec.sgid = sit->second;
     rec.cid = 0;
     rec.cgid = 0;
+    rec.jailCid = 0;
     rec.timed = minutes > 0;
     if (rec.timed)
         rec.releaseAt = std::chrono::steady_clock::now() + std::chrono::minutes(minutes);
@@ -475,6 +479,28 @@ PLUGINS_EXPORTDLL void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuTy
         case MENU_BAN_24H:
             ts3Functions.banclient(schid, target, 86400, "Banned 24 hours by staff.", RETURN_CODE);
             break;
+    }
+}
+
+PLUGINS_EXPORTDLL void ts3plugin_onClientMoveEvent(uint64 schid, anyID clientID, uint64 oldChannelID, uint64 newChannelID, int visibility, const char* moveMessage) {
+    if (newChannelID == 0 || clientID == ts3SelfClientID(schid)) return;
+    std::string uid = ts3ClientString(schid, clientID, CLIENT_UNIQUE_IDENTIFIER);
+    uint64 jail = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_records.find(schid);
+        if (it == g_records.end()) return;
+        for (auto& r : it->second)
+            if (r.uid == uid && r.kind == ACT_JAIL && r.jailCid) {
+                jail = r.jailCid;
+                break;
+            }
+    }
+    if (jail && newChannelID != jail) {
+        ts3Functions.requestClientMove(schid, clientID, jail, "", RETURN_CODE);
+        std::string name = ts3ClientString(schid, clientID, CLIENT_NICKNAME);
+        std::string msg = "Staff Tools: " + ts3Sanitize(name.c_str()) + " moved back to jail";
+        printError(schid, msg.c_str());
     }
 }
 
