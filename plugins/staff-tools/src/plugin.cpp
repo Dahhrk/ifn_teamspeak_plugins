@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <time.h>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -42,6 +43,7 @@ struct TimedRecord {
     std::string uid;
     uint64 dbid;
     std::string name;
+    std::string channelName;
     ActionKind kind;
     uint64 sgid;
     uint64 cid;
@@ -56,11 +58,12 @@ static std::map<uint64, uint64> g_stickySgid;
 static std::map<uint64, uint64> g_mutedSgid;
 static std::map<uint64, uint64> g_cmuteCgid;
 static std::map<uint64, uint64> g_defaultCgid;
+static std::map<uint64, std::string> g_serverUid;
 static std::mutex g_mutex;
 static std::thread g_worker;
 static std::atomic<bool> g_running{false};
 
-TS3_PLUGIN_IDENTITY("IFN Staff Tools", "1.4", "Dahhrk",
+TS3_PLUGIN_IDENTITY("IFN Staff Tools", "1.5", "Dahhrk",
                     "Right-click actions: pull, timed jail/mute/sticky with auto-release, talk power, pokes, kicks, bans.", 23)
 
 static void printMsg(uint64 schid, const char* msg) {
@@ -120,6 +123,90 @@ static void releaseRecord(uint64 schid, const TimedRecord& rec) {
     printMsg(schid, msg.c_str());
 }
 
+static std::string storePath() {
+    std::string dir = ts3ConfigDir();
+    if (dir.empty()) return dir;
+    if (dir.back() != '\\' && dir.back() != '/') dir += '/';
+    return dir + "ifn_staff_records.txt";
+}
+
+static void saveRecords() {
+    std::string path = storePath();
+    if (path.empty()) return;
+    std::string body;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto now = std::chrono::steady_clock::now();
+        for (auto& [schid, records] : g_records) {
+            auto sit = g_serverUid.find(schid);
+            if (sit == g_serverUid.end()) continue;
+            for (auto& r : records) {
+                uint64 exp = 0;
+                if (r.timed)
+                    exp = (uint64)((int64_t)time(NULL) +
+                          std::chrono::duration_cast<std::chrono::seconds>(r.releaseAt - now).count());
+                body += ts3Esc(sit->second) + "|" + std::to_string((int)r.kind) + "|" +
+                        ts3Esc(r.uid) + "|" + std::to_string(r.dbid) + "|" +
+                        std::to_string(r.sgid) + "|" + std::to_string(r.cgid) + "|" +
+                        ts3Esc(r.channelName) + "|" + std::to_string(exp) + "|" +
+                        ts3Esc(r.name) + "\n";
+            }
+        }
+    }
+    ts3WriteFile(path, body);
+}
+
+static void releaseRecord(uint64 schid, const TimedRecord& rec);
+
+static void loadRecords(uint64 schid) {
+    std::string server = ts3ServerUid(schid);
+    if (server.empty()) return;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_serverUid[schid] = server;
+    }
+    std::vector<TimedRecord> live, dead;
+    ts3ReadLines(storePath(), server, [&](const std::vector<std::string>& f) {
+        if (f.size() < 9) return;
+        TimedRecord rec;
+        rec.kind = (ActionKind)atoi(f[1].c_str());
+        rec.uid = f[2];
+        rec.dbid = strtoull(f[3].c_str(), NULL, 10);
+        rec.sgid = strtoull(f[4].c_str(), NULL, 10);
+        rec.cgid = strtoull(f[5].c_str(), NULL, 10);
+        rec.channelName = f[6];
+        uint64 exp = strtoull(f[7].c_str(), NULL, 10);
+        rec.name = f[8];
+        if (rec.uid.empty()) return;
+        rec.timed = exp != 0;
+        rec.cid = 0;
+        rec.jailCid = 0;
+        uint64 cid = 0;
+        if (!rec.channelName.empty() && ts3FindChannelByName(schid, rec.channelName.c_str(), &cid))
+            rec.cid = cid;
+        if (rec.kind == ACT_JAIL && ts3FindChannelByName(schid, "jail", &cid))
+            rec.jailCid = cid;
+        if (rec.timed) {
+            int64_t left = (int64_t)exp - (int64_t)time(NULL);
+            if (left <= 0) {
+                dead.push_back(rec);
+                return;
+            }
+            rec.releaseAt = std::chrono::steady_clock::now() + std::chrono::seconds(left);
+        }
+        live.push_back(rec);
+    });
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        for (auto& r : live) g_records[schid].push_back(r);
+    }
+    for (auto& r : dead) releaseRecord(schid, r);
+    if (!live.empty()) {
+        std::string msg = "Staff Tools: restored " + std::to_string(live.size()) + " active record(s) from before disconnect.";
+        printMsg(schid, msg.c_str());
+    }
+}
+
 static void timerWorker() {
     while (g_running.load()) {
         std::this_thread::sleep_for(std::chrono::seconds(5));
@@ -137,6 +224,7 @@ static void timerWorker() {
                 }
             }
         }
+        if (!due.empty()) saveRecords();
         for (auto& [schid, records] : due)
             for (auto& rec : records) releaseRecord(schid, rec);
     }
@@ -166,6 +254,7 @@ static bool fillBase(uint64 schid, anyID target, ActionKind kind, int minutes, T
     rec->cid = 0;
     rec->cgid = 0;
     rec->jailCid = 0;
+    rec->channelName.clear();
     rec->timed = minutes > 0;
     if (rec->timed)
         rec->releaseAt = std::chrono::steady_clock::now() + std::chrono::minutes(minutes);
@@ -186,12 +275,14 @@ static void jailClient(uint64 schid, anyID target, int minutes) {
     uint64 cid = 0;
     ts3Functions.getChannelOfClient(schid, target, &cid);
     rec.cid = cid;
+    rec.channelName = cid ? ts3ChannelName(schid, cid) : "";
     rec.jailCid = jail;
 
     if (!addRecord(schid, rec)) {
         printMsg(schid, "Staff Tools: target already jailed.");
         return;
     }
+    saveRecords();
 
     ts3Functions.requestClientMove(schid, target, jail, "", RETURN_CODE);
     if (rec.sgid && rec.dbid)
@@ -208,8 +299,6 @@ static void muteClient(uint64 schid, anyID target, int minutes, bool channelOnly
     if (!fillBase(schid, target, channelOnly ? ACT_CMUTE : ACT_MUTE, minutes, &rec)) return;
 
     if (channelOnly) {
-        rec.kind = ACT_CMUTE;
-        rec.kind = ACT_CMUTE;
         auto git = g_cmuteCgid.find(schid);
         if (git == g_cmuteCgid.end() || !git->second) {
             printMsg(schid, "Staff Tools: no 'Channel Muted' channel group on this server.");
@@ -222,6 +311,7 @@ static void muteClient(uint64 schid, anyID target, int minutes, bool channelOnly
             return;
         }
         rec.cid = cid;
+        rec.channelName = ts3ChannelName(schid, cid);
         uint64 prev = 0;
         ts3Functions.getClientVariableAsUInt64(schid, target, CLIENT_CHANNEL_GROUP_ID, &prev);
         if (!prev) {
@@ -247,6 +337,7 @@ static void muteClient(uint64 schid, anyID target, int minutes, bool channelOnly
         printMsg(schid, "Staff Tools: target already has that action.");
         return;
     }
+    saveRecords();
 
     if (channelOnly) {
         const uint64 cgids[] = {rec.sgid};
@@ -277,6 +368,7 @@ static void stickyClient(uint64 schid, anyID target, int minutes) {
         printMsg(schid, "Staff Tools: target already stickied.");
         return;
     }
+    saveRecords();
     if (rec.dbid)
         ts3Functions.requestServerGroupAddClient(schid, rec.sgid, rec.dbid, RETURN_CODE);
 
@@ -305,6 +397,7 @@ static void releaseClient(uint64 schid, anyID target, std::initializer_list<Acti
         printMsg(schid, noneMsg);
         return;
     }
+    saveRecords();
     for (auto& rec : found) releaseRecord(schid, rec);
 }
 
@@ -347,6 +440,7 @@ PLUGINS_EXPORTDLL int ts3plugin_init() {
 PLUGINS_EXPORTDLL void ts3plugin_shutdown() {
     g_running.store(false);
     if (g_worker.joinable()) g_worker.join();
+    saveRecords();
     ts3FreePluginID();
 }
 
@@ -500,13 +594,16 @@ PLUGINS_EXPORTDLL void ts3plugin_onConnectStatusChangeEvent(uint64 schid, int ne
         ts3Functions.requestChannelSubscribeAll(schid, "");
         ts3Functions.requestServerGroupList(schid, "");
         ts3Functions.requestChannelGroupList(schid, "");
+        loadRecords(schid);
     } else if (newStatus == STATUS_DISCONNECTED) {
+        saveRecords();
         std::lock_guard<std::mutex> lock(g_mutex);
         g_records.erase(schid);
         g_stickySgid.erase(schid);
         g_mutedSgid.erase(schid);
         g_cmuteCgid.erase(schid);
         g_defaultCgid.erase(schid);
+        g_serverUid.erase(schid);
     }
 }
 
