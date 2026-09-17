@@ -22,6 +22,7 @@ struct StickyRecord {
     uint64 dbid;
     std::string name;
     uint64 returnCid;
+    uint64 jailCid;
     bool timed;
     std::chrono::steady_clock::time_point releaseAt;
 };
@@ -32,7 +33,7 @@ static std::mutex g_mutex;
 static std::thread g_worker;
 static std::atomic<bool> g_running{false};
 
-TS3_PLUGIN_IDENTITY("IFN Sticky Tools", "1.1", "Dahhrk",
+TS3_PLUGIN_IDENTITY("IFN Sticky Tools", "1.2", "Dahhrk",
                     "Send users to the jail channel with the Sticky group - indefinite or timed with auto-release.", 23)
 
 static void printError(uint64 schid, const char* msg) {
@@ -102,6 +103,7 @@ static void stickyClient(uint64 schid, anyID target, int minutes) {
     uint64 cid = 0;
     ts3Functions.getChannelOfClient(schid, target, &cid);
     rec.returnCid = cid;
+    rec.jailCid = jail;
     rec.timed = minutes > 0;
     if (rec.timed)
         rec.releaseAt = std::chrono::steady_clock::now() + std::chrono::minutes(minutes);
@@ -237,6 +239,28 @@ PLUGINS_EXPORTDLL void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuTy
         case MENU_UNSTICKY:
             unstickyClient(schid, target);
             break;
+    }
+}
+
+PLUGINS_EXPORTDLL void ts3plugin_onClientMoveEvent(uint64 schid, anyID clientID, uint64 oldChannelID, uint64 newChannelID, int visibility, const char* moveMessage) {
+    if (newChannelID == 0 || clientID == ts3SelfClientID(schid)) return;
+    std::string uid = ts3ClientString(schid, clientID, CLIENT_UNIQUE_IDENTIFIER);
+    uint64 jail = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_records.find(schid);
+        if (it == g_records.end()) return;
+        for (auto& r : it->second)
+            if (r.uid == uid) {
+                jail = r.jailCid;
+                break;
+            }
+    }
+    if (jail && newChannelID != jail) {
+        ts3Functions.requestClientMove(schid, clientID, jail, "", RETURN_CODE);
+        std::string name = ts3ClientString(schid, clientID, CLIENT_NICKNAME);
+        std::string msg = "Sticky: " + ts3Sanitize(name.c_str()) + " moved back to jail";
+        printError(schid, msg.c_str());
     }
 }
 
