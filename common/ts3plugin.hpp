@@ -13,6 +13,7 @@
 #include <string.h>
 #include <fstream>
 #include <functional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -91,6 +92,20 @@ static std::string ts3ClientString(uint64 schid, anyID clid, size_t flag) {
     if (ts3Functions.getClientVariableAsString(schid, clid, flag, &v) == ERROR_ok && v) {
         out = v;
         ts3Functions.freeMemory(v);
+    }
+    return out;
+}
+
+static std::set<uint64> ts3ClientGroupSet(uint64 schid, anyID clid) {
+    std::set<uint64> out;
+    std::string csv = ts3ClientString(schid, clid, CLIENT_SERVERGROUPS);
+    size_t pos = 0;
+    while (pos <= csv.size()) {
+        size_t comma = csv.find(',', pos);
+        std::string tok = csv.substr(pos, comma == std::string::npos ? comma : comma - pos);
+        if (!tok.empty()) out.insert(strtoull(tok.c_str(), NULL, 10));
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
     }
     return out;
 }

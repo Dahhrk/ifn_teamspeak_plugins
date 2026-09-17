@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <time.h>
@@ -16,6 +17,7 @@ enum MenuId {
     MENU_STICKY_15M,
     MENU_STICKY_60M,
     MENU_UNSTICKY,
+    MENU_EXTEND,
 };
 
 struct StickyRecord {
@@ -37,7 +39,7 @@ static std::mutex g_mutex;
 static std::thread g_worker;
 static std::atomic<bool> g_running{false};
 
-TS3_PLUGIN_IDENTITY("IFN Sticky Tools", "1.3", "Dahhrk",
+TS3_PLUGIN_IDENTITY("IFN Sticky Tools", "1.4", "Dahhrk",
                     "Send users to the jail channel with the Sticky group - indefinite or timed with auto-release.", 23)
 
 static void printMsg(uint64 schid, const char* msg) {
@@ -72,7 +74,25 @@ static std::string storePath() {
 static void saveRecords() {
     std::string path = storePath();
     if (path.empty()) return;
+    std::vector<std::string> current;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        for (auto& [schid, records] : g_records) {
+            auto sit = g_serverUid.find(schid);
+            if (!records.empty() && sit != g_serverUid.end()) current.push_back(sit->second);
+        }
+    }
     std::string body;
+    {
+        std::ifstream in(path.c_str());
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.empty()) continue;
+            std::vector<std::string> f = ts3Split(line);
+            if (!f.empty() && std::find(current.begin(), current.end(), f[0]) == current.end())
+                body += line + "\n";
+        }
+    }
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         auto now = std::chrono::steady_clock::now();
@@ -191,8 +211,12 @@ static void stickyClient(uint64 schid, anyID target, int minutes) {
     rec.sgid = sit->second;
     uint64 cid = 0;
     ts3Functions.getChannelOfClient(schid, target, &cid);
-    rec.returnCid = cid;
-    rec.channelName = cid ? ts3ChannelName(schid, cid) : "";
+    if (cid != jail) {
+        rec.returnCid = cid;
+        rec.channelName = cid ? ts3ChannelName(schid, cid) : "";
+    } else {
+        rec.returnCid = 0;
+    }
     rec.jailCid = jail;
     rec.timed = minutes > 0;
     if (rec.timed)
@@ -242,6 +266,28 @@ static void unstickyClient(uint64 schid, anyID target) {
     }
     saveRecords();
     releaseSticky(schid, rec);
+}
+
+static void extendSticky(uint64 schid, anyID target, int minutes) {
+    std::string uid = ts3ClientString(schid, target, CLIENT_UNIQUE_IDENTIFIER);
+    int n = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_records.find(schid);
+        if (it != g_records.end())
+            for (auto& r : it->second)
+                if (r.uid == uid && r.timed) {
+                    r.releaseAt += std::chrono::minutes(minutes);
+                    ++n;
+                }
+    }
+    if (!n) {
+        printMsg(schid, "Sticky: no timed jail on target.");
+        return;
+    }
+    saveRecords();
+    std::string msg = "Sticky: extended by " + std::to_string(minutes) + " min.";
+    printMsg(schid, msg.c_str());
 }
 
 static void printBoard(uint64 schid) {
@@ -298,6 +344,7 @@ PLUGINS_EXPORTDLL void ts3plugin_initMenus(struct PluginMenuItem*** menuItems, c
         {MENU_STICKY_15M, "Sticky 15 min", PLUGIN_MENU_TYPE_CLIENT},
         {MENU_STICKY_60M, "Sticky 60 min", PLUGIN_MENU_TYPE_CLIENT},
         {MENU_UNSTICKY, "Unsticky", PLUGIN_MENU_TYPE_CLIENT},
+        {MENU_EXTEND, "Extend +15 min", PLUGIN_MENU_TYPE_CLIENT},
     };
     const size_t count = sizeof(items) / sizeof(items[0]);
     *menuItems = (struct PluginMenuItem**)malloc((count + 1) * sizeof(struct PluginMenuItem*));
@@ -331,6 +378,9 @@ PLUGINS_EXPORTDLL void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuTy
             break;
         case MENU_UNSTICKY:
             unstickyClient(schid, target);
+            break;
+        case MENU_EXTEND:
+            extendSticky(schid, target, 15);
             break;
     }
 }

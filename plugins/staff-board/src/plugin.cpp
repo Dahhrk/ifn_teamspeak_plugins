@@ -31,21 +31,13 @@ struct Group {
 
 static std::map<uint64, std::vector<Group>> g_groups;
 
-TS3_PLUGIN_IDENTITY("IFN Staff Board", "1.0", "Dahhrk",
+TS3_PLUGIN_IDENTITY("IFN Staff Board", "1.1", "Dahhrk",
                     "Print online staff grouped by rank tier.", 23)
 TS3_PLUGIN_LIFECYCLE_DEFAULT
 
-static std::vector<uint64> parseGroupIds(const std::string& csv) {
-    std::vector<uint64> out;
-    size_t pos = 0;
-    while (pos <= csv.size()) {
-        size_t comma = csv.find(',', pos);
-        std::string tok = csv.substr(pos, comma == std::string::npos ? comma : comma - pos);
-        if (!tok.empty()) out.push_back(strtoull(tok.c_str(), NULL, 10));
-        if (comma == std::string::npos) break;
-        pos = comma + 1;
-    }
-    return out;
+static void requestGroupList(uint64 schid) {
+    g_groups.erase(schid);
+    ts3Functions.requestServerGroupList(schid, "");
 }
 
 static std::set<uint64> staffGroupIds(uint64 schid, const char* const* names) {
@@ -74,9 +66,7 @@ static void printBoard(uint64 schid) {
     size_t online = 0, staff = 0;
     for (anyID clid : ts3ClientList(schid)) {
         ++online;
-        std::string groupsCsv = ts3ClientString(schid, clid, CLIENT_SERVERGROUPS);
-        std::set<uint64> clientGroups;
-        for (uint64 s : parseGroupIds(groupsCsv)) clientGroups.insert(s);
+        std::set<uint64> clientGroups = ts3ClientGroupSet(schid, clid);
 
         size_t tier = tierCount;
         for (size_t t = 0; t < tierCount; ++t) {
@@ -115,13 +105,13 @@ PLUGINS_EXPORTDLL void ts3plugin_initMenus(struct PluginMenuItem*** menuItems, c
 PLUGINS_EXPORTDLL void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuType type, int menuItemID, uint64 selectedItemID) {
     if (type != PLUGIN_MENU_TYPE_GLOBAL) return;
     if (menuItemID == MENU_ID_BOARD) printBoard(schid);
-    else if (menuItemID == MENU_ID_REFRESH) ts3Functions.requestServerGroupList(schid, "");
+    else if (menuItemID == MENU_ID_REFRESH) requestGroupList(schid);
 }
 
 PLUGINS_EXPORTDLL void ts3plugin_onConnectStatusChangeEvent(uint64 schid, int newStatus, unsigned int errorNumber) {
     if (newStatus == STATUS_CONNECTION_ESTABLISHED) {
         ts3Functions.requestChannelSubscribeAll(schid, "");
-        ts3Functions.requestServerGroupList(schid, "");
+        requestGroupList(schid);
     } else if (newStatus == STATUS_DISCONNECTED) {
         g_groups.erase(schid);
     }

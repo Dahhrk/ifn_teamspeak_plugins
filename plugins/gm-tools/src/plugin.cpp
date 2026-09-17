@@ -32,7 +32,7 @@ static std::map<uint64, std::chrono::steady_clock::time_point> g_radarQuiet;
 static std::map<uint64, bool> g_watchOn;
 static std::map<uint64, std::map<std::string, std::chrono::steady_clock::time_point>> g_watchLast;
 
-TS3_PLUGIN_IDENTITY("IFN GM Tools", "1.2", "Dahhrk",
+TS3_PLUGIN_IDENTITY("IFN GM Tools", "1.3", "Dahhrk",
                     "Event tools: pull groups, channel pokes, channel-wide talk power, GM radar, event-channel watch.", 23)
 TS3_PLUGIN_LIFECYCLE_DEFAULT
 
@@ -46,28 +46,15 @@ static std::vector<anyID> channelClients(uint64 schid, uint64 cid) {
     return out;
 }
 
-static bool clientInGroup(uint64 schid, anyID clid, uint64 sgid) {
-    std::string csv = ts3ClientString(schid, clid, CLIENT_SERVERGROUPS);
-    std::string needle = std::to_string(sgid);
-    size_t pos = 0;
-    while (pos <= csv.size()) {
-        size_t comma = csv.find(',', pos);
-        std::string tok = csv.substr(pos, comma == std::string::npos ? comma : comma - pos);
-        if (tok == needle) return true;
-        if (comma == std::string::npos) break;
-        pos = comma + 1;
-    }
-    return false;
-}
-
 static void pullGroup(uint64 schid, const Group& g) {
+    anyID self = ts3SelfClientID(schid);
     uint64 myCid = 0;
-    if (ts3Functions.getChannelOfClient(schid, ts3SelfClientID(schid), &myCid) != ERROR_ok) return;
+    if (ts3Functions.getChannelOfClient(schid, self, &myCid) != ERROR_ok) return;
 
     size_t moved = 0;
     for (anyID clid : ts3ClientList(schid)) {
-        if (clid == ts3SelfClientID(schid)) continue;
-        if (!clientInGroup(schid, clid, g.sgid)) continue;
+        if (clid == self) continue;
+        if (!ts3ClientGroupSet(schid, clid).count(g.sgid)) continue;
         uint64 theirCid = 0;
         ts3Functions.getChannelOfClient(schid, clid, &theirCid);
         if (theirCid == myCid) continue;
@@ -79,9 +66,9 @@ static void pullGroup(uint64 schid, const Group& g) {
 }
 
 static void pokeChannel(uint64 schid, const char* text) {
-    uint64 myCid = 0;
-    if (ts3Functions.getChannelOfClient(schid, ts3SelfClientID(schid), &myCid) != ERROR_ok) return;
     anyID self = ts3SelfClientID(schid);
+    uint64 myCid = 0;
+    if (ts3Functions.getChannelOfClient(schid, self, &myCid) != ERROR_ok) return;
     size_t poked = 0;
     for (anyID clid : channelClients(schid, myCid)) {
         if (clid == self) continue;
@@ -93,9 +80,9 @@ static void pokeChannel(uint64 schid, const char* text) {
 }
 
 static void setChannelTalker(uint64 schid, int talker) {
-    uint64 myCid = 0;
-    if (ts3Functions.getChannelOfClient(schid, ts3SelfClientID(schid), &myCid) != ERROR_ok) return;
     anyID self = ts3SelfClientID(schid);
+    uint64 myCid = 0;
+    if (ts3Functions.getChannelOfClient(schid, self, &myCid) != ERROR_ok) return;
     size_t changed = 0;
     for (anyID clid : channelClients(schid, myCid)) {
         if (clid == self) continue;
@@ -107,16 +94,6 @@ static void setChannelTalker(uint64 schid, int talker) {
     ts3Functions.printMessage(schid, msg.c_str(), PLUGIN_MESSAGE_TARGET_SERVER);
 }
 
-static std::string channelName(uint64 schid, uint64 cid) {
-    char* name = NULL;
-    std::string out;
-    if (ts3Functions.getChannelVariableAsString(schid, cid, CHANNEL_NAME, &name) == ERROR_ok && name) {
-        out = name;
-        ts3Functions.freeMemory(name);
-    }
-    return out;
-}
-
 static bool channelWatched(const std::string& channelNameLower) {
     for (auto* n : WATCH_NEEDLES)
         if (channelNameLower.find(n) != std::string::npos) return true;
@@ -126,13 +103,14 @@ static bool channelWatched(const std::string& channelNameLower) {
 static void watchCheck(uint64 schid, anyID clientID, uint64 newChannelID) {
     auto wit = g_watchOn.find(schid);
     if (wit == g_watchOn.end() || !wit->second) return;
-    std::string cname = channelName(schid, newChannelID);
+    std::string cname = ts3ChannelName(schid, newChannelID);
     if (cname.empty()) return;
     std::string lower = cname;
     for (auto& c : lower) c = (char)tolower((unsigned char)c);
     if (!channelWatched(lower)) return;
 
     std::string uid = ts3ClientString(schid, clientID, CLIENT_UNIQUE_IDENTIFIER);
+    if (uid.empty()) return;
     auto now = std::chrono::steady_clock::now();
     auto& last = g_watchLast[schid][uid];
     if (now - last < std::chrono::seconds(60)) return;
@@ -145,15 +123,9 @@ static void watchCheck(uint64 schid, anyID clientID, uint64 newChannelID) {
 static bool isGm(uint64 schid, anyID clid) {
     auto sit = g_gmSgids.find(schid);
     if (sit == g_gmSgids.end()) return false;
-    std::string csv = ts3ClientString(schid, clid, CLIENT_SERVERGROUPS);
-    size_t pos = 0;
-    while (pos <= csv.size()) {
-        size_t comma = csv.find(',', pos);
-        std::string tok = csv.substr(pos, comma == std::string::npos ? comma : comma - pos);
-        if (!tok.empty() && sit->second.count((uint64)strtoull(tok.c_str(), NULL, 10))) return true;
-        if (comma == std::string::npos) break;
-        pos = comma + 1;
-    }
+    std::set<uint64> groups = ts3ClientGroupSet(schid, clid);
+    for (uint64 sgid : sit->second)
+        if (groups.count(sgid)) return true;
     return false;
 }
 
@@ -262,23 +234,29 @@ PLUGINS_EXPORTDLL void ts3plugin_onClientMoveEvent(uint64 schid, anyID clientID,
     if (clientID == ts3SelfClientID(schid)) return;
 
     auto rit = g_radarOn.find(schid);
-    if (rit != g_radarOn.end() && rit->second && visibility == ENTER_VISIBILITY) {
-        if (!isGm(schid, clientID)) return;
-        std::string uid = ts3ClientString(schid, clientID, CLIENT_UNIQUE_IDENTIFIER);
-        std::string name = ts3ClientString(schid, clientID, CLIENT_NICKNAME);
-        if (g_gmOnline[schid].count(uid)) return;
-        g_gmOnline[schid][uid] = name;
-        auto qit = g_radarQuiet.find(schid);
-        if (qit != g_radarQuiet.end() && std::chrono::steady_clock::now() < qit->second) return;
-        std::string msg = "GM radar: " + ts3Sanitize(name.c_str()) + " connected";
-        ts3Functions.printMessage(schid, msg.c_str(), PLUGIN_MESSAGE_TARGET_SERVER);
-    } else if (rit != g_radarOn.end() && rit->second && visibility == LEAVE_VISIBILITY) {
-        std::string uid = ts3ClientString(schid, clientID, CLIENT_UNIQUE_IDENTIFIER);
-        auto it = g_gmOnline[schid].find(uid);
-        if (it == g_gmOnline[schid].end()) return;
-        std::string msg = "GM radar: " + ts3Sanitize(it->second.c_str()) + " disconnected";
-        g_gmOnline[schid].erase(it);
-        ts3Functions.printMessage(schid, msg.c_str(), PLUGIN_MESSAGE_TARGET_SERVER);
+    if (rit != g_radarOn.end() && rit->second) {
+        if (visibility == ENTER_VISIBILITY && isGm(schid, clientID)) {
+            std::string uid = ts3ClientString(schid, clientID, CLIENT_UNIQUE_IDENTIFIER);
+            if (!g_gmOnline[schid].count(uid)) {
+                std::string name = ts3ClientString(schid, clientID, CLIENT_NICKNAME);
+                g_gmOnline[schid][uid] = name;
+                auto qit = g_radarQuiet.find(schid);
+                bool quiet = qit != g_radarQuiet.end() &&
+                             std::chrono::steady_clock::now() < qit->second;
+                if (!quiet) {
+                    std::string msg = "GM radar: " + ts3Sanitize(name.c_str()) + " connected";
+                    ts3Functions.printMessage(schid, msg.c_str(), PLUGIN_MESSAGE_TARGET_SERVER);
+                }
+            }
+        } else if (visibility == LEAVE_VISIBILITY) {
+            std::string uid = ts3ClientString(schid, clientID, CLIENT_UNIQUE_IDENTIFIER);
+            auto it = g_gmOnline[schid].find(uid);
+            if (it != g_gmOnline[schid].end()) {
+                std::string msg = "GM radar: " + ts3Sanitize(it->second.c_str()) + " disconnected";
+                g_gmOnline[schid].erase(it);
+                ts3Functions.printMessage(schid, msg.c_str(), PLUGIN_MESSAGE_TARGET_SERVER);
+            }
+        }
     }
 
     if (newChannelID != 0 && newChannelID != oldChannelID)
