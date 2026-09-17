@@ -63,7 +63,7 @@ static std::atomic<bool> g_running{false};
 TS3_PLUGIN_IDENTITY("IFN Staff Tools", "1.4", "Dahhrk",
                     "Right-click actions: pull, timed jail/mute/sticky with auto-release, talk power, pokes, kicks, bans.", 23)
 
-static void printError(uint64 schid, const char* msg) {
+static void printMsg(uint64 schid, const char* msg) {
     ts3Functions.printMessage(schid, msg, PLUGIN_MESSAGE_TARGET_SERVER);
 }
 
@@ -117,7 +117,7 @@ static void releaseRecord(uint64 schid, const TimedRecord& rec) {
     }
     std::string msg = "Staff Tools: " + ts3Sanitize(rec.name.c_str()) + " " +
                       kindName(rec.kind) + " released" + detail;
-    printError(schid, msg.c_str());
+    printMsg(schid, msg.c_str());
 }
 
 static void timerWorker() {
@@ -151,33 +151,45 @@ static bool addRecord(uint64 schid, const TimedRecord& rec) {
     return true;
 }
 
+static bool fillBase(uint64 schid, anyID target, ActionKind kind, int minutes, TimedRecord* rec) {
+    rec->uid = ts3ClientString(schid, target, CLIENT_UNIQUE_IDENTIFIER);
+    if (rec->uid.empty()) {
+        printMsg(schid, "Staff Tools: cannot read target identity.");
+        return false;
+    }
+    rec->name = ts3ClientString(schid, target, CLIENT_NICKNAME);
+    rec->kind = kind;
+    uint64 dbid = 0;
+    ts3Functions.getClientVariableAsUInt64(schid, target, CLIENT_DATABASE_ID, &dbid);
+    rec->dbid = dbid;
+    rec->sgid = 0;
+    rec->cid = 0;
+    rec->cgid = 0;
+    rec->jailCid = 0;
+    rec->timed = minutes > 0;
+    if (rec->timed)
+        rec->releaseAt = std::chrono::steady_clock::now() + std::chrono::minutes(minutes);
+    return true;
+}
+
 static void jailClient(uint64 schid, anyID target, int minutes) {
     uint64 jail = 0;
     if (!ts3FindChannelByName(schid, "jail", &jail)) {
-        printError(schid, "Staff Tools: no channel containing 'jail' on this server.");
+        printMsg(schid, "Staff Tools: no channel containing 'jail' on this server.");
         return;
     }
 
     TimedRecord rec;
-    rec.uid = ts3ClientString(schid, target, CLIENT_UNIQUE_IDENTIFIER);
-    rec.name = ts3ClientString(schid, target, CLIENT_NICKNAME);
-    rec.kind = ACT_JAIL;
-    uint64 dbid = 0;
-    ts3Functions.getClientVariableAsUInt64(schid, target, CLIENT_DATABASE_ID, &dbid);
-    rec.dbid = dbid;
+    if (!fillBase(schid, target, ACT_JAIL, minutes, &rec)) return;
     auto sit = g_stickySgid.find(schid);
     rec.sgid = sit != g_stickySgid.end() ? sit->second : 0;
     uint64 cid = 0;
     ts3Functions.getChannelOfClient(schid, target, &cid);
     rec.cid = cid;
-    rec.cgid = 0;
     rec.jailCid = jail;
-    rec.timed = minutes > 0;
-    if (rec.timed)
-        rec.releaseAt = std::chrono::steady_clock::now() + std::chrono::minutes(minutes);
 
     if (!addRecord(schid, rec)) {
-        printError(schid, "Staff Tools: target already jailed.");
+        printMsg(schid, "Staff Tools: target already jailed.");
         return;
     }
 
@@ -188,34 +200,25 @@ static void jailClient(uint64 schid, anyID target, int minutes) {
     std::string msg = "Jail: " + ts3Sanitize(rec.name.c_str());
     msg += minutes > 0 ? " jailed for " + std::to_string(minutes) + " min - auto-release set"
                        : " jailed - use Release to free";
-    printError(schid, msg.c_str());
+    printMsg(schid, msg.c_str());
 }
 
 static void muteClient(uint64 schid, anyID target, int minutes, bool channelOnly) {
     TimedRecord rec;
-    rec.uid = ts3ClientString(schid, target, CLIENT_UNIQUE_IDENTIFIER);
-    rec.name = ts3ClientString(schid, target, CLIENT_NICKNAME);
-    uint64 dbid = 0;
-    ts3Functions.getClientVariableAsUInt64(schid, target, CLIENT_DATABASE_ID, &dbid);
-    rec.dbid = dbid;
-    rec.cid = 0;
-    rec.cgid = 0;
-    rec.jailCid = 0;
-    rec.timed = minutes > 0;
-    if (rec.timed)
-        rec.releaseAt = std::chrono::steady_clock::now() + std::chrono::minutes(minutes);
+    if (!fillBase(schid, target, channelOnly ? ACT_CMUTE : ACT_MUTE, minutes, &rec)) return;
 
     if (channelOnly) {
         rec.kind = ACT_CMUTE;
+        rec.kind = ACT_CMUTE;
         auto git = g_cmuteCgid.find(schid);
         if (git == g_cmuteCgid.end() || !git->second) {
-            printError(schid, "Staff Tools: no 'Channel Muted' channel group on this server.");
+            printMsg(schid, "Staff Tools: no 'Channel Muted' channel group on this server.");
             return;
         }
         uint64 cid = 0;
         ts3Functions.getChannelOfClient(schid, target, &cid);
         if (!cid) {
-            printError(schid, "Staff Tools: cannot read target channel.");
+            printMsg(schid, "Staff Tools: cannot read target channel.");
             return;
         }
         rec.cid = cid;
@@ -226,23 +229,22 @@ static void muteClient(uint64 schid, anyID target, int minutes, bool channelOnly
             prev = dit != g_defaultCgid.end() ? dit->second : 0;
         }
         if (!prev) {
-            printError(schid, "Staff Tools: cannot resolve prior channel group.");
+            printMsg(schid, "Staff Tools: cannot resolve prior channel group.");
             return;
         }
         rec.cgid = prev;
         rec.sgid = git->second;
     } else {
-        rec.kind = ACT_MUTE;
         auto mit = g_mutedSgid.find(schid);
         if (mit == g_mutedSgid.end() || !mit->second) {
-            printError(schid, "Staff Tools: no 'Muted' server group on this server.");
+            printMsg(schid, "Staff Tools: no 'Muted' server group on this server.");
             return;
         }
         rec.sgid = mit->second;
     }
 
     if (!addRecord(schid, rec)) {
-        printError(schid, "Staff Tools: target already has that action.");
+        printMsg(schid, "Staff Tools: target already has that action.");
         return;
     }
 
@@ -257,33 +259,22 @@ static void muteClient(uint64 schid, anyID target, int minutes, bool channelOnly
 
     std::string msg = "Staff Tools: " + ts3Sanitize(rec.name.c_str()) + " " +
                       kindName(rec.kind) + " for " + std::to_string(minutes) + " min";
-    printError(schid, msg.c_str());
+    printMsg(schid, msg.c_str());
 }
 
 static void stickyClient(uint64 schid, anyID target, int minutes) {
     auto sit = g_stickySgid.find(schid);
     if (sit == g_stickySgid.end() || !sit->second) {
-        printError(schid, "Staff Tools: no 'Sticky' server group on this server.");
+        printMsg(schid, "Staff Tools: no 'Sticky' server group on this server.");
         return;
     }
 
     TimedRecord rec;
-    rec.uid = ts3ClientString(schid, target, CLIENT_UNIQUE_IDENTIFIER);
-    rec.name = ts3ClientString(schid, target, CLIENT_NICKNAME);
-    rec.kind = ACT_STICKY;
-    uint64 dbid = 0;
-    ts3Functions.getClientVariableAsUInt64(schid, target, CLIENT_DATABASE_ID, &dbid);
-    rec.dbid = dbid;
+    if (!fillBase(schid, target, ACT_STICKY, minutes, &rec)) return;
     rec.sgid = sit->second;
-    rec.cid = 0;
-    rec.cgid = 0;
-    rec.jailCid = 0;
-    rec.timed = minutes > 0;
-    if (rec.timed)
-        rec.releaseAt = std::chrono::steady_clock::now() + std::chrono::minutes(minutes);
 
     if (!addRecord(schid, rec)) {
-        printError(schid, "Staff Tools: target already stickied.");
+        printMsg(schid, "Staff Tools: target already stickied.");
         return;
     }
     if (rec.dbid)
@@ -291,10 +282,10 @@ static void stickyClient(uint64 schid, anyID target, int minutes) {
 
     std::string msg = "Staff Tools: " + ts3Sanitize(rec.name.c_str()) + " stickied";
     msg += minutes > 0 ? " for " + std::to_string(minutes) + " min" : " - use Unsticky to remove";
-    printError(schid, msg.c_str());
+    printMsg(schid, msg.c_str());
 }
 
-static void releaseClient(uint64 schid, anyID target, std::vector<ActionKind> kinds, const char* noneMsg) {
+static void releaseClient(uint64 schid, anyID target, std::initializer_list<ActionKind> kinds, const char* noneMsg) {
     std::string uid = ts3ClientString(schid, target, CLIENT_UNIQUE_IDENTIFIER);
     std::vector<TimedRecord> found;
     {
@@ -311,7 +302,7 @@ static void releaseClient(uint64 schid, anyID target, std::vector<ActionKind> ki
         }
     }
     if (found.empty()) {
-        printError(schid, noneMsg);
+        printMsg(schid, noneMsg);
         return;
     }
     for (auto& rec : found) releaseRecord(schid, rec);
@@ -325,7 +316,7 @@ static void printBoard(uint64 schid) {
         if (it != g_records.end()) snapshot = it->second;
     }
     if (snapshot.empty()) {
-        printError(schid, "Staff Tools: no active jails or mutes.");
+        printMsg(schid, "Staff Tools: no active jails or mutes.");
         return;
     }
     auto now = std::chrono::steady_clock::now();
@@ -405,7 +396,7 @@ PLUGINS_EXPORTDLL void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuTy
     if (type != PLUGIN_MENU_TYPE_CLIENT) return;
     anyID target = (anyID)selectedItemID;
     if (target == ts3SelfClientID(schid)) {
-        printError(schid, "Staff Tools: cannot target yourself.");
+        printMsg(schid, "Staff Tools: cannot target yourself.");
         return;
     }
 
@@ -484,12 +475,12 @@ PLUGINS_EXPORTDLL void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuTy
 
 PLUGINS_EXPORTDLL void ts3plugin_onClientMoveEvent(uint64 schid, anyID clientID, uint64 oldChannelID, uint64 newChannelID, int visibility, const char* moveMessage) {
     if (newChannelID == 0 || clientID == ts3SelfClientID(schid)) return;
-    std::string uid = ts3ClientString(schid, clientID, CLIENT_UNIQUE_IDENTIFIER);
     uint64 jail = 0;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         auto it = g_records.find(schid);
-        if (it == g_records.end()) return;
+        if (it == g_records.end() || it->second.empty()) return;
+        std::string uid = ts3ClientString(schid, clientID, CLIENT_UNIQUE_IDENTIFIER);
         for (auto& r : it->second)
             if (r.uid == uid && r.kind == ACT_JAIL && r.jailCid) {
                 jail = r.jailCid;
@@ -500,7 +491,7 @@ PLUGINS_EXPORTDLL void ts3plugin_onClientMoveEvent(uint64 schid, anyID clientID,
         ts3Functions.requestClientMove(schid, clientID, jail, "", RETURN_CODE);
         std::string name = ts3ClientString(schid, clientID, CLIENT_NICKNAME);
         std::string msg = "Staff Tools: " + ts3Sanitize(name.c_str()) + " moved back to jail";
-        printError(schid, msg.c_str());
+        printMsg(schid, msg.c_str());
     }
 }
 
@@ -535,7 +526,7 @@ PLUGINS_EXPORTDLL int ts3plugin_onServerErrorEvent(uint64 schid, const char* err
     if (!returnCode || strcmp(returnCode, RETURN_CODE) != 0) return 0;
     if (error != ERROR_ok) {
         std::string msg = std::string("Staff Tools: ") + (errorMessage ? errorMessage : "request failed");
-        printError(schid, msg.c_str());
+        printMsg(schid, msg.c_str());
         return 1;
     }
     return 1;
