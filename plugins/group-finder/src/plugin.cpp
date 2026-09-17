@@ -28,7 +28,7 @@ struct Pending {
 static std::map<uint64, std::vector<Group>> g_groups;
 static std::map<uint64, Pending> g_pending;
 
-TS3_PLUGIN_IDENTITY("IFN Group Finder", "1.0", "Dahhrk",
+TS3_PLUGIN_IDENTITY("IFN Group Finder", "1.1", "Dahhrk",
                     "Find users by server group and print clickable PM links.", 23)
 TS3_PLUGIN_LIFECYCLE_DEFAULT
 
@@ -44,8 +44,10 @@ static void flushPending(uint64 schid) {
     g_pending.erase(pit);
 
     std::map<std::string, anyID> onlineByUid;
-    for (anyID clid : ts3ClientList(schid))
-        onlineByUid[ts3ClientString(schid, clid, CLIENT_UNIQUE_IDENTIFIER)] = clid;
+    for (anyID clid : ts3ClientList(schid)) {
+        std::string uid = ts3ClientString(schid, clid, CLIENT_UNIQUE_IDENTIFIER);
+        if (!uid.empty()) onlineByUid[uid] = clid;
+    }
 
     size_t online = 0;
     for (const auto& m : p.members)

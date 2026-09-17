@@ -34,6 +34,7 @@ enum MenuId {
     MENU_STICKY,
     MENU_STICKY_30M,
     MENU_UNSTICKY,
+    MENU_EXTEND,
     MENU_BOARD,
 };
 
@@ -63,7 +64,7 @@ static std::mutex g_mutex;
 static std::thread g_worker;
 static std::atomic<bool> g_running{false};
 
-TS3_PLUGIN_IDENTITY("IFN Staff Tools", "1.5", "Dahhrk",
+TS3_PLUGIN_IDENTITY("IFN Staff Tools", "1.6", "Dahhrk",
                     "Right-click actions: pull, timed jail/mute/sticky with auto-release, talk power, pokes, kicks, bans.", 23)
 
 static void printMsg(uint64 schid, const char* msg) {
@@ -133,7 +134,25 @@ static std::string storePath() {
 static void saveRecords() {
     std::string path = storePath();
     if (path.empty()) return;
+    std::vector<std::string> current;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        for (auto& [schid, records] : g_records) {
+            auto sit = g_serverUid.find(schid);
+            if (!records.empty() && sit != g_serverUid.end()) current.push_back(sit->second);
+        }
+    }
     std::string body;
+    {
+        std::ifstream in(path.c_str());
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.empty()) continue;
+            std::vector<std::string> f = ts3Split(line);
+            if (!f.empty() && std::find(current.begin(), current.end(), f[0]) == current.end())
+                body += line + "\n";
+        }
+    }
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         auto now = std::chrono::steady_clock::now();
@@ -274,8 +293,10 @@ static void jailClient(uint64 schid, anyID target, int minutes) {
     rec.sgid = sit != g_stickySgid.end() ? sit->second : 0;
     uint64 cid = 0;
     ts3Functions.getChannelOfClient(schid, target, &cid);
-    rec.cid = cid;
-    rec.channelName = cid ? ts3ChannelName(schid, cid) : "";
+    if (cid != jail) {
+        rec.cid = cid;
+        rec.channelName = cid ? ts3ChannelName(schid, cid) : "";
+    }
     rec.jailCid = jail;
 
     if (!addRecord(schid, rec)) {
@@ -383,7 +404,10 @@ static void releaseClient(uint64 schid, anyID target, std::initializer_list<Acti
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         auto it = g_records.find(schid);
-        if (it == g_records.end()) return;
+        if (it == g_records.end()) {
+            printMsg(schid, noneMsg);
+            return;
+        }
         for (size_t i = it->second.size(); i-- > 0;) {
             bool match = it->second[i].uid == uid &&
                          std::find(kinds.begin(), kinds.end(), it->second[i].kind) != kinds.end();
@@ -399,6 +423,29 @@ static void releaseClient(uint64 schid, anyID target, std::initializer_list<Acti
     }
     saveRecords();
     for (auto& rec : found) releaseRecord(schid, rec);
+}
+
+static void extendClient(uint64 schid, anyID target, int minutes) {
+    std::string uid = ts3ClientString(schid, target, CLIENT_UNIQUE_IDENTIFIER);
+    int n = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_records.find(schid);
+        if (it != g_records.end())
+            for (auto& r : it->second)
+                if (r.uid == uid && r.timed) {
+                    r.releaseAt += std::chrono::minutes(minutes);
+                    ++n;
+                }
+    }
+    if (!n) {
+        printMsg(schid, "Staff Tools: no timed actions on target.");
+        return;
+    }
+    saveRecords();
+    std::string msg = "Staff Tools: extended " + std::to_string(n) + " action(s) by " +
+                      std::to_string(minutes) + " min.";
+    printMsg(schid, msg.c_str());
 }
 
 static void printBoard(uint64 schid) {
@@ -465,6 +512,7 @@ PLUGINS_EXPORTDLL void ts3plugin_initMenus(struct PluginMenuItem*** menuItems, c
         {MENU_STICKY, "Sticky", PLUGIN_MENU_TYPE_CLIENT},
         {MENU_STICKY_30M, "Sticky 30 min", PLUGIN_MENU_TYPE_CLIENT},
         {MENU_UNSTICKY, "Unsticky", PLUGIN_MENU_TYPE_CLIENT},
+        {MENU_EXTEND, "Extend +15 min", PLUGIN_MENU_TYPE_CLIENT},
         {MENU_TALK_GRANT, "Grant talk power", PLUGIN_MENU_TYPE_CLIENT},
         {MENU_TALK_REVOKE, "Revoke talk power", PLUGIN_MENU_TYPE_CLIENT},
         {MENU_POKE_STAFF, "Poke: join staff channel", PLUGIN_MENU_TYPE_CLIENT},
@@ -539,6 +587,9 @@ PLUGINS_EXPORTDLL void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuTy
             break;
         case MENU_UNSTICKY:
             releaseClient(schid, target, {ACT_STICKY}, "Staff Tools: target is not stickied.");
+            break;
+        case MENU_EXTEND:
+            extendClient(schid, target, 15);
             break;
         case MENU_TALK_GRANT:
             ts3Functions.requestClientSetIsTalker(schid, target, 1, RETURN_CODE);
